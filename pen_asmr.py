@@ -3,6 +3,7 @@ import sys
 import json
 import wave
 import math
+import time
 import array
 import random
 import shutil
@@ -228,6 +229,8 @@ WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 LLMHF_INJECTED = 0x01
+MI_WP_SIGNATURE = 0xFF515700
+SIGNATURE_MASK = 0xFFFFFF00
 TABLET_MAX_PRESSURE = 8192
 
 class MSLLHOOKSTRUCT(Structure):
@@ -263,6 +266,7 @@ class PenInputHook:
         self.pen_down = False
         self.pressure = 0
         self.raw_mouse_mode = False
+        self.pen_detector = None
 
     def install(self):
         def _callback(nCode, wParam, lParam):
@@ -270,20 +274,26 @@ class PenInputHook:
                 try:
                     info = ctypes.cast(lParam, CPTR(MSLLHOOKSTRUCT)).contents
                     injected = bool(info.flags & LLMHF_INJECTED)
-                    accept = self.raw_mouse_mode or injected
+                    pointer_gen = (info.dwExtraInfo & SIGNATURE_MASK) == MI_WP_SIGNATURE
+                    pen_active = (
+                        self.pen_detector is not None
+                        and self.pen_detector.is_pen_recent()
+                    )
+                    accept = self.raw_mouse_mode or injected or pointer_gen or pen_active
 
                     if accept:
+                        has_pressure = injected and info.dwExtraInfo > 0
                         if wParam == WM_LBUTTONDOWN:
                             self.pen_down = True
-                            self.pressure = (
-                                TABLET_MAX_PRESSURE if self.raw_mouse_mode
-                                else info.dwExtraInfo
-                            )
+                            if self.raw_mouse_mode or not has_pressure:
+                                self.pressure = TABLET_MAX_PRESSURE
+                            else:
+                                self.pressure = info.dwExtraInfo
                         elif wParam == WM_LBUTTONUP:
                             self.pen_down = False
                             self.pressure = 0
                         elif wParam == WM_MOUSEMOVE and self.pen_down:
-                            if not self.raw_mouse_mode:
+                            if has_pressure:
                                 self.pressure = info.dwExtraInfo
                 except Exception:
                     pass
@@ -297,6 +307,150 @@ class PenInputHook:
         if self._hook:
             _user32.UnhookWindowsHookEx(self._hook)
             self._hook = None
+
+
+# ── Raw Input pen detection ──────────────────────────────────────────────────
+
+WM_INPUT = 0x00FF
+RIDEV_INPUTSINK = 0x00000100
+RIM_TYPEHID = 2
+RID_INPUT = 0x10000003
+RIDI_PREPARSEDDATA = 0x20000005
+HID_USAGE_PAGE_DIGITIZER = 0x0D
+HID_USAGE_DIGITIZER_PEN = 0x02
+
+class RAWINPUTDEVICE(Structure):
+    _fields_ = [
+        ("usUsagePage", ctypes.c_ushort),
+        ("usUsage", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_uint32),
+        ("hwndTarget", wintypes.HWND),
+    ]
+
+class RAWINPUTHEADER(Structure):
+    _fields_ = [
+        ("dwType", ctypes.c_uint32),
+        ("dwSize", ctypes.c_uint32),
+        ("hDevice", ctypes.c_void_p),
+        ("wParam", ctypes.c_size_t),
+    ]
+
+WNDPROC_TYPE = ctypes.WINFUNCTYPE(
+    ctypes.c_longlong, wintypes.HWND, ctypes.c_uint,
+    ctypes.c_size_t, ctypes.c_ssize_t,
+)
+
+class WNDCLASSEXW(Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint),
+        ("style", ctypes.c_uint),
+        ("lpfnWndProc", WNDPROC_TYPE),
+        ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int),
+        ("hInstance", wintypes.HINSTANCE),
+        ("hIcon", wintypes.HICON),
+        ("hCursor", wintypes.HANDLE),
+        ("hbrBackground", wintypes.HANDLE),
+        ("lpszMenuName", wintypes.LPCWSTR),
+        ("lpszClassName", wintypes.LPCWSTR),
+        ("hIconSm", wintypes.HICON),
+    ]
+
+_user32.RegisterClassExW.argtypes = [CPTR(WNDCLASSEXW)]
+_user32.RegisterClassExW.restype = wintypes.ATOM
+_user32.CreateWindowExW.argtypes = [
+    ctypes.c_uint32, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_uint32,
+    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, ctypes.c_void_p,
+]
+_user32.CreateWindowExW.restype = wintypes.HWND
+_user32.DefWindowProcW.argtypes = [
+    wintypes.HWND, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t,
+]
+_user32.DefWindowProcW.restype = ctypes.c_longlong
+_user32.DestroyWindow.argtypes = [wintypes.HWND]
+_user32.DestroyWindow.restype = wintypes.BOOL
+_user32.RegisterRawInputDevices.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint,
+]
+_user32.RegisterRawInputDevices.restype = wintypes.BOOL
+_user32.GetRawInputData.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p,
+    CPTR(ctypes.c_uint), ctypes.c_uint,
+]
+_user32.GetRawInputData.restype = ctypes.c_uint
+_kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+_kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+
+HWND_MESSAGE = -3
+
+
+class RawPenDetector:
+    def __init__(self):
+        self._last_pen_time = 0.0
+        self._hwnd = None
+        self._wndproc_ref = None
+
+    def start(self):
+        def wndproc(hwnd, msg, wParam, lParam):
+            if msg == WM_INPUT:
+                self._on_raw_input(lParam)
+            return _user32.DefWindowProcW(hwnd, msg, wParam, lParam)
+
+        self._wndproc_ref = WNDPROC_TYPE(wndproc)
+        hInst = _kernel32.GetModuleHandleW(None)
+
+        wc = WNDCLASSEXW()
+        wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+        wc.lpfnWndProc = self._wndproc_ref
+        wc.hInstance = hInst
+        wc.lpszClassName = "SketchASMR_RawPen"
+        _user32.RegisterClassExW(byref(wc))
+
+        self._hwnd = _user32.CreateWindowExW(
+            0, "SketchASMR_RawPen", "", 0,
+            0, 0, 0, 0,
+            HWND_MESSAGE, None, hInst, None,
+        )
+        if not self._hwnd:
+            print("[raw pen] failed to create window", flush=True)
+            return False
+
+        rid = RAWINPUTDEVICE()
+        rid.usUsagePage = HID_USAGE_PAGE_DIGITIZER
+        rid.usUsage = HID_USAGE_DIGITIZER_PEN
+        rid.dwFlags = RIDEV_INPUTSINK
+        rid.hwndTarget = self._hwnd
+        ok = _user32.RegisterRawInputDevices(
+            byref(rid), 1, ctypes.sizeof(rid),
+        )
+        print(f"[raw pen] digitizer registered: {bool(ok)}", flush=True)
+        return bool(ok)
+
+    def _on_raw_input(self, hRawInput):
+        size = ctypes.c_uint(0)
+        _user32.GetRawInputData(
+            hRawInput, RID_INPUT, None, byref(size),
+            ctypes.sizeof(RAWINPUTHEADER),
+        )
+        if size.value == 0:
+            return
+        buf = ctypes.create_string_buffer(size.value)
+        _user32.GetRawInputData(
+            hRawInput, RID_INPUT, buf, byref(size),
+            ctypes.sizeof(RAWINPUTHEADER),
+        )
+        header = RAWINPUTHEADER.from_buffer_copy(buf)
+        if header.dwType == RIM_TYPEHID:
+            self._last_pen_time = time.monotonic()
+
+    def is_pen_recent(self, threshold_s=0.15):
+        return (time.monotonic() - self._last_pen_time) < threshold_s
+
+    def stop(self):
+        if self._hwnd:
+            _user32.DestroyWindow(self._hwnd)
+            self._hwnd = None
 
 
 # ── Global hotkey (RegisterHotKey) ────────────────────────────────────────────
@@ -668,6 +822,7 @@ class PenASMR:
         self.tray_icon = None
         self.qt_app = None
         self._pen_hook = None
+        self._pen_detector = None
         self._poll_timer = None
         self._was_down = False
         self._settings_dialog = None
@@ -794,6 +949,8 @@ class PenASMR:
             self.hotkey_mgr.unregister()
         if self._pen_hook:
             self._pen_hook.uninstall()
+        if hasattr(self, "_pen_detector") and self._pen_detector:
+            self._pen_detector.stop()
         if self.audio:
             self.audio.stop()
             self.audio.cleanup()
@@ -827,8 +984,12 @@ class PenASMR:
             hk = self.settings.pause_hotkey
             print(f"[{APP_NAME}] Hotkey: {hk} ({'ok' if ok else 'failed'})", flush=True)
 
+        self._pen_detector = RawPenDetector()
+        self._pen_detector.start()
+
         self._pen_hook = PenInputHook()
         self._pen_hook.raw_mouse_mode = (self.settings.input_mode == "mouse")
+        self._pen_hook.pen_detector = self._pen_detector
         if self._pen_hook.install():
             mode = self.settings.input_mode
             print(f"[{APP_NAME}] Input: {mode} mode", flush=True)

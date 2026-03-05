@@ -1,13 +1,15 @@
 @echo off
 setlocal
 
+set "PYTHON=C:\Users\Home\AppData\Local\Programs\Python\Python312\python.exe"
+
 echo.
 echo ============================================
 echo   Building SketchASMR
 echo ============================================
 echo.
 
-pip install -r requirements.txt
+"%PYTHON%" -m pip install -r requirements.txt
 if errorlevel 1 (
     echo ERROR: Failed to install dependencies.
     pause
@@ -18,7 +20,7 @@ echo.
 echo Building portable executable...
 echo.
 
-pyinstaller ^
+"%PYTHON%" -m PyInstaller ^
     --noconfirm ^
     --onefile ^
     --windowed ^
