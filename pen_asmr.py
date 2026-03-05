@@ -1,17 +1,24 @@
-import ctypes
-from ctypes import wintypes, Structure, WINFUNCTYPE, c_uint, c_int, c_long, c_ulong, c_void_p, byref, sizeof
-import threading
-import time
 import os
 import sys
+import json
 import wave
 import math
 import array
 import random
+import shutil
+import ctypes
+from ctypes import wintypes, Structure, byref, POINTER as CPTR
+
+os.environ["QT_WINTAB_ENABLED"] = "0"
 
 import pygame
-import pystray
-from PIL import Image, ImageDraw
+from PyQt6.QtWidgets import (
+    QApplication, QSystemTrayIcon, QMenu, QDialog, QVBoxLayout, QHBoxLayout,
+    QGroupBox, QRadioButton, QListWidget, QPushButton, QSlider, QLabel,
+    QFileDialog, QWidget,
+)
+from PyQt6.QtGui import QIcon, QImage, QPixmap, QColor, QAction, QKeySequence
+from PyQt6.QtCore import Qt, QTimer
 
 
 if getattr(sys, "frozen", False):
@@ -21,139 +28,103 @@ else:
     EXE_DIR = os.path.dirname(os.path.abspath(__file__))
     BUNDLE_DIR = EXE_DIR
 
-SOUND_DIR = os.path.join(EXE_DIR, "sounds")
-BUNDLED_SOUND = os.path.join(BUNDLE_DIR, "sounds", "writing.wav")
-DEFAULT_SOUND = os.path.join(SOUND_DIR, "writing.wav")
-APP_NAME = "DrawTablet ASMR"
+APPDATA_DIR = os.path.join(os.environ.get("APPDATA", EXE_DIR), "SketchASMR")
+_local_sounds = os.path.join(EXE_DIR, "sounds")
+PORTABLE = os.path.isdir(_local_sounds) or not getattr(sys, "frozen", False)
+DATA_DIR = EXE_DIR if PORTABLE else APPDATA_DIR
 
-# ── WinTab constants ─────────────────────────────────────────────────────────
-
-WT_PACKET = 0x7FF0
-WTI_DEVICES = 100
-WTI_DEFSYSCTX = 4
-DVC_NPRESSURE = 18
-LCNAMELEN = 40
-
-CXO_SYSTEM = 0x0001
-CXO_MESSAGES = 0x0004
-
-PK_NORMAL_PRESSURE = 0x0400
+SOUND_DIR = os.path.join(DATA_DIR, "sounds")
+BUNDLED_SOUND_DIR = os.path.join(BUNDLE_DIR, "sounds")
+ICON_FILE = os.path.join(BUNDLE_DIR, "icon.png")
+FALLBACK_WAV = os.path.join(SOUND_DIR, "writing.wav")
+SUPPORTED_AUDIO_EXT = (".mp3", ".wav", ".ogg")
+CONFIG_FILE = os.path.join(DATA_DIR, "settings.json")
+APP_NAME = "SketchASMR"
+APP_AUTHOR = "janitorpuppo"
+APP_URL = "https://janitor.gg"
+MIN_VOLUME = 0.05
 
 
-class AXIS(Structure):
-    _fields_ = [
-        ("axMin", c_long),
-        ("axMax", c_long),
-        ("axUnits", c_uint),
-        ("axResolution", c_ulong),
-    ]
+# ── Settings persistence ─────────────────────────────────────────────────────
+
+class Settings:
+    DEFAULTS = {
+        "input_mode": "tablet",
+        "max_volume": 80,
+        "pause_hotkey": "",
+    }
+
+    def __init__(self):
+        self.data = dict(self.DEFAULTS)
+        self.load()
+
+    def load(self):
+        try:
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                self.data.update(json.load(f))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            pass
+
+    def save(self):
+        try:
+            os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, indent=2)
+        except OSError:
+            pass
+
+    @property
+    def input_mode(self):
+        return self.data["input_mode"]
+
+    @input_mode.setter
+    def input_mode(self, v):
+        self.data["input_mode"] = v
+
+    @property
+    def max_volume(self):
+        return self.data["max_volume"]
+
+    @max_volume.setter
+    def max_volume(self, v):
+        self.data["max_volume"] = v
+
+    @property
+    def pause_hotkey(self):
+        return self.data["pause_hotkey"]
+
+    @pause_hotkey.setter
+    def pause_hotkey(self, v):
+        self.data["pause_hotkey"] = v
 
 
-class LOGCONTEXT(Structure):
-    _fields_ = [
-        ("lcName", ctypes.c_wchar * LCNAMELEN),
-        ("lcOptions", c_uint),
-        ("lcStatus", c_uint),
-        ("lcLocks", c_uint),
-        ("lcMsgBase", c_uint),
-        ("lcDevice", c_uint),
-        ("lcPktRate", c_uint),
-        ("lcPktData", c_ulong),
-        ("lcPktMode", c_ulong),
-        ("lcMoveMask", c_ulong),
-        ("lcBtnDnMask", c_ulong),
-        ("lcBtnUpMask", c_ulong),
-        ("lcInOrgX", c_long),
-        ("lcInOrgY", c_long),
-        ("lcInOrgZ", c_long),
-        ("lcInExtX", c_long),
-        ("lcInExtY", c_long),
-        ("lcInExtZ", c_long),
-        ("lcOutOrgX", c_long),
-        ("lcOutOrgY", c_long),
-        ("lcOutOrgZ", c_long),
-        ("lcOutExtX", c_long),
-        ("lcOutExtY", c_long),
-        ("lcOutExtZ", c_long),
-        ("lcSensX", c_ulong),
-        ("lcSensY", c_ulong),
-        ("lcSensZ", c_ulong),
-        ("lcSysMode", ctypes.c_bool),
-        ("lcSysOrgX", c_long),
-        ("lcSysOrgY", c_long),
-        ("lcSysExtX", c_long),
-        ("lcSysExtY", c_long),
-        ("lcSysSensX", c_ulong),
-        ("lcSysSensY", c_ulong),
-    ]
+# ── Sound file discovery ─────────────────────────────────────────────────────
+
+def seed_bundled_sounds():
+    if BUNDLED_SOUND_DIR == SOUND_DIR:
+        return
+    if not os.path.isdir(BUNDLED_SOUND_DIR):
+        return
+    os.makedirs(SOUND_DIR, exist_ok=True)
+    for f in os.listdir(BUNDLED_SOUND_DIR):
+        if os.path.splitext(f)[1].lower() in SUPPORTED_AUDIO_EXT:
+            dest = os.path.join(SOUND_DIR, f)
+            if not os.path.exists(dest):
+                shutil.copy2(os.path.join(BUNDLED_SOUND_DIR, f), dest)
 
 
-class PACKET(Structure):
-    _fields_ = [
-        ("pkNormalPressure", c_uint),
-    ]
+def find_sound_files():
+    files = []
+    if os.path.isdir(SOUND_DIR):
+        for f in sorted(os.listdir(SOUND_DIR)):
+            if os.path.splitext(f)[1].lower() in SUPPORTED_AUDIO_EXT:
+                files.append(os.path.join(SOUND_DIR, f))
+    return files
 
-
-# ── Win32 constants ──────────────────────────────────────────────────────────
-
-WM_DESTROY = 0x0002
-WM_HOTKEY = 0x0312
-WM_TIMER = 0x0113
-WM_USER = 0x0400
-WM_QUIT_APP = WM_USER + 1
-WS_OVERLAPPED = 0x00000000
-WS_EX_TOOLWINDOW = 0x00000080
-MOD_CONTROL = 0x0002
-MOD_SHIFT = 0x0004
-HOTKEY_TOGGLE = 1
-TIMER_ID = 1
-
-user32 = ctypes.windll.user32
-kernel32 = ctypes.windll.kernel32
-
-WNDPROC = WINFUNCTYPE(c_long, wintypes.HWND, c_uint, wintypes.WPARAM, wintypes.LPARAM)
-
-
-class WNDCLASSEXW(Structure):
-    _fields_ = [
-        ("cbSize", c_uint),
-        ("style", c_uint),
-        ("lpfnWndProc", WNDPROC),
-        ("cbClsExtra", c_int),
-        ("cbWndExtra", c_int),
-        ("hInstance", wintypes.HINSTANCE),
-        ("hIcon", wintypes.HICON),
-        ("hCursor", wintypes.HANDLE),
-        ("hbrBackground", wintypes.HBRUSH),
-        ("lpszMenuName", wintypes.LPCWSTR),
-        ("lpszClassName", wintypes.LPCWSTR),
-        ("hIconSm", wintypes.HICON),
-    ]
-
-
-# ── Tray icon image generation ───────────────────────────────────────────────
-
-def make_tray_icon(active):
-    img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    bg_color = (76, 175, 80, 255) if active else (158, 158, 158, 255)
-    draw.ellipse([4, 4, 60, 60], fill=bg_color)
-
-    pen_color = (255, 255, 255, 255)
-    draw.line([22, 42, 42, 18], fill=pen_color, width=5)
-    draw.polygon([(42, 18), (46, 14), (44, 22)], fill=pen_color)
-    draw.line([20, 46, 38, 46], fill=pen_color, width=2)
-
-    return img
-
-
-# ── Placeholder sound generation ─────────────────────────────────────────────
 
 def generate_placeholder_wav(filename, duration=3.0, sample_rate=44100):
     n_samples = int(duration * sample_rate)
     samples = array.array("h")
-
     for i in range(n_samples):
         t = i / sample_rate
         noise = random.randint(-3000, 3000)
@@ -163,7 +134,6 @@ def generate_placeholder_wav(filename, duration=3.0, sample_rate=44100):
         sample = int((noise + crinkle + scratch) * envelope)
         sample = max(-32768, min(32767, sample))
         samples.append(sample)
-
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     with wave.open(filename, "w") as wf:
         wf.setnchannels(1)
@@ -175,278 +145,682 @@ def generate_placeholder_wav(filename, duration=3.0, sample_rate=44100):
 # ── Audio manager ────────────────────────────────────────────────────────────
 
 class AudioManager:
-    def __init__(self, sound_path):
-        pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
-        self.sound = pygame.mixer.Sound(sound_path)
-        self.channel = None
-        self.playing = False
+    def __init__(self, playlist):
+        if not pygame.mixer.get_init():
+            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+        self.playlist = playlist
+        self.current_index = 0
+        self.state = "idle"
         self.current_volume = 0.0
+        self._load_current()
+
+    def _load_current(self):
+        pygame.mixer.music.load(self.playlist[self.current_index])
+
+    def _advance(self):
+        self.current_index = (self.current_index + 1) % len(self.playlist)
+        self._load_current()
+
+    def _start_playing(self, vol):
+        pygame.mixer.music.set_volume(vol)
+        loops = -1 if len(self.playlist) == 1 else 0
+        pygame.mixer.music.play(loops=loops)
+        self.state = "playing"
+        self.current_volume = vol
 
     def play(self, volume=1.0):
         vol = max(0.0, min(1.0, volume))
-        if not self.playing:
-            self.sound.set_volume(vol)
-            self.channel = self.sound.play(loops=-1)
-            self.playing = True
+        if self.state == "idle":
+            self._start_playing(vol)
+        elif self.state == "paused":
+            pygame.mixer.music.set_volume(vol)
+            pygame.mixer.music.unpause()
+            self.state = "playing"
             self.current_volume = vol
+        elif not pygame.mixer.music.get_busy():
+            self._advance()
+            self._start_playing(vol)
         elif abs(vol - self.current_volume) > 0.05:
-            self.sound.set_volume(vol)
+            pygame.mixer.music.set_volume(vol)
             self.current_volume = vol
 
     def stop(self):
-        if self.playing and self.channel:
-            self.channel.fadeout(80)
-            self.playing = False
+        if self.state == "playing":
+            pygame.mixer.music.pause()
+            self.state = "paused"
             self.current_volume = 0.0
 
     def cleanup(self):
+        pygame.mixer.music.stop()
         pygame.mixer.quit()
 
 
-# ── WinTab interface ─────────────────────────────────────────────────────────
+# ── Low-level mouse hook ─────────────────────────────────────────────────────
 
-class WinTabManager:
+class POINT(Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+WH_MOUSE_LL = 14
+WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+LLMHF_INJECTED = 0x01
+TABLET_MAX_PRESSURE = 8192
+
+class MSLLHOOKSTRUCT(Structure):
+    _fields_ = [
+        ("pt", POINT),
+        ("mouseData", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("time", ctypes.c_uint32),
+        ("dwExtraInfo", ctypes.c_size_t),
+    ]
+
+HOOKPROC = ctypes.WINFUNCTYPE(
+    ctypes.c_longlong, ctypes.c_int, ctypes.c_ulonglong, ctypes.c_longlong,
+)
+
+_user32 = ctypes.windll.user32
+_user32.SetWindowsHookExW.argtypes = [
+    ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD,
+]
+_user32.SetWindowsHookExW.restype = ctypes.c_void_p
+_user32.CallNextHookEx.argtypes = [
+    ctypes.c_void_p, ctypes.c_int, ctypes.c_ulonglong, ctypes.c_longlong,
+]
+_user32.CallNextHookEx.restype = ctypes.c_longlong
+_user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+_user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+
+
+class PenInputHook:
     def __init__(self):
-        self.wintab = None
-        self.hctx = None
-        self.max_pressure = 8192
-        self.available = False
-        self._load()
+        self._hook = None
+        self._hook_proc = None
+        self.pen_down = False
+        self.pressure = 0
+        self.raw_mouse_mode = False
 
-    def _load(self):
-        try:
-            self.wintab = ctypes.WinDLL("wintab32.dll")
-            self.wintab.WTInfoW.restype = c_uint
-            self.wintab.WTInfoW.argtypes = [c_uint, c_uint, c_void_p]
-            self.wintab.WTOpenW.restype = c_void_p
-            self.wintab.WTOpenW.argtypes = [wintypes.HWND, ctypes.POINTER(LOGCONTEXT), ctypes.c_bool]
-            self.wintab.WTPacket.restype = ctypes.c_bool
-            self.wintab.WTPacket.argtypes = [c_void_p, c_uint, c_void_p]
-            self.wintab.WTClose.restype = ctypes.c_bool
-            self.wintab.WTClose.argtypes = [c_void_p]
-            self.wintab.WTEnable.restype = ctypes.c_bool
-            self.wintab.WTEnable.argtypes = [c_void_p, ctypes.c_bool]
+    def install(self):
+        def _callback(nCode, wParam, lParam):
+            if nCode >= 0 and wParam in (WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE):
+                try:
+                    info = ctypes.cast(lParam, CPTR(MSLLHOOKSTRUCT)).contents
+                    injected = bool(info.flags & LLMHF_INJECTED)
+                    accept = self.raw_mouse_mode or injected
 
-            pressure_axis = AXIS()
-            ret = self.wintab.WTInfoW(WTI_DEVICES, DVC_NPRESSURE, byref(pressure_axis))
-            if ret > 0 and pressure_axis.axMax > 0:
-                self.max_pressure = pressure_axis.axMax
+                    if accept:
+                        if wParam == WM_LBUTTONDOWN:
+                            self.pen_down = True
+                            self.pressure = (
+                                TABLET_MAX_PRESSURE if self.raw_mouse_mode
+                                else info.dwExtraInfo
+                            )
+                        elif wParam == WM_LBUTTONUP:
+                            self.pen_down = False
+                            self.pressure = 0
+                        elif wParam == WM_MOUSEMOVE and self.pen_down:
+                            if not self.raw_mouse_mode:
+                                self.pressure = info.dwExtraInfo
+                except Exception:
+                    pass
+            return _user32.CallNextHookEx(self._hook, nCode, wParam, lParam)
 
-            self.available = True
-        except OSError:
-            self.available = False
+        self._hook_proc = HOOKPROC(_callback)
+        self._hook = _user32.SetWindowsHookExW(WH_MOUSE_LL, self._hook_proc, None, 0)
+        return self._hook is not None and self._hook != 0
 
-    def open_context(self, hwnd):
-        if not self.available:
+    def uninstall(self):
+        if self._hook:
+            _user32.UnhookWindowsHookEx(self._hook)
+            self._hook = None
+
+
+# ── Global hotkey (RegisterHotKey) ────────────────────────────────────────────
+
+WM_HOTKEY = 0x0312
+MOD_ALT = 0x0001
+MOD_CONTROL = 0x0002
+MOD_SHIFT = 0x0004
+MOD_WIN = 0x0008
+MOD_NOREPEAT = 0x4000
+HOTKEY_TOGGLE_ID = 1
+
+_user32.RegisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
+_user32.RegisterHotKey.restype = wintypes.BOOL
+_user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+_user32.UnregisterHotKey.restype = wintypes.BOOL
+
+QT_KEY_TO_VK = {
+    Qt.Key.Key_F1: 0x70, Qt.Key.Key_F2: 0x71, Qt.Key.Key_F3: 0x72,
+    Qt.Key.Key_F4: 0x73, Qt.Key.Key_F5: 0x74, Qt.Key.Key_F6: 0x75,
+    Qt.Key.Key_F7: 0x76, Qt.Key.Key_F8: 0x77, Qt.Key.Key_F9: 0x78,
+    Qt.Key.Key_F10: 0x79, Qt.Key.Key_F11: 0x7A, Qt.Key.Key_F12: 0x7B,
+    Qt.Key.Key_Space: 0x20, Qt.Key.Key_Return: 0x0D, Qt.Key.Key_Enter: 0x0D,
+    Qt.Key.Key_Escape: 0x1B, Qt.Key.Key_Tab: 0x09, Qt.Key.Key_Backspace: 0x08,
+    Qt.Key.Key_Delete: 0x2E, Qt.Key.Key_Insert: 0x2D,
+    Qt.Key.Key_Home: 0x24, Qt.Key.Key_End: 0x23,
+    Qt.Key.Key_PageUp: 0x21, Qt.Key.Key_PageDown: 0x22,
+}
+
+
+def qt_key_to_vk(qt_key):
+    if qt_key in QT_KEY_TO_VK:
+        return QT_KEY_TO_VK[qt_key]
+    val = qt_key.value if hasattr(qt_key, "value") else int(qt_key)
+    if 0x20 <= val <= 0x7E:
+        return val
+    return 0
+
+
+class MSG(Structure):
+    _fields_ = [
+        ("hwnd", ctypes.c_void_p),
+        ("message", ctypes.c_uint32),
+        ("wParam", ctypes.c_size_t),
+        ("lParam", ctypes.c_ssize_t),
+        ("time", ctypes.c_uint32),
+        ("pt", POINT),
+    ]
+
+_user32.PeekMessageW.argtypes = [
+    CPTR(MSG), wintypes.HWND, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint,
+]
+_user32.PeekMessageW.restype = wintypes.BOOL
+PM_REMOVE = 0x0001
+
+
+class HotkeyManager:
+    def __init__(self, callback):
+        self.callback = callback
+        self._registered = False
+        self._timer = None
+
+    def start_polling(self):
+        self._timer = QTimer()
+        self._timer.timeout.connect(self._check_hotkey)
+        self._timer.start(50)
+
+    def _check_hotkey(self):
+        if not self._registered:
+            return
+        msg = MSG()
+        while _user32.PeekMessageW(byref(msg), None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE):
+            if msg.wParam == HOTKEY_TOGGLE_ID:
+                self.callback()
+
+    def register(self, key_sequence_str):
+        self.unregister()
+        if not key_sequence_str:
+            return False
+        seq = QKeySequence.fromString(key_sequence_str)
+        if seq.isEmpty():
             return False
 
-        lc = LOGCONTEXT()
-        ret = self.wintab.WTInfoW(WTI_DEFSYSCTX, 0, byref(lc))
-        if ret == 0:
+        combo = seq[0]
+        qt_mods = combo.keyboardModifiers()
+        qt_key = combo.key()
+
+        win_mods = MOD_NOREPEAT
+        if qt_mods & Qt.KeyboardModifier.ControlModifier:
+            win_mods |= MOD_CONTROL
+        if qt_mods & Qt.KeyboardModifier.ShiftModifier:
+            win_mods |= MOD_SHIFT
+        if qt_mods & Qt.KeyboardModifier.AltModifier:
+            win_mods |= MOD_ALT
+        if qt_mods & Qt.KeyboardModifier.MetaModifier:
+            win_mods |= MOD_WIN
+
+        vk = qt_key_to_vk(qt_key)
+        if not vk:
             return False
 
-        lc.lcName = "PenASMR"
-        lc.lcOptions |= CXO_MESSAGES | CXO_SYSTEM
-        lc.lcPktData = PK_NORMAL_PRESSURE
-        lc.lcPktMode = 0
-        lc.lcMoveMask = PK_NORMAL_PRESSURE
-        lc.lcMsgBase = WT_PACKET
+        ok = _user32.RegisterHotKey(None, HOTKEY_TOGGLE_ID, win_mods, vk)
+        self._registered = bool(ok)
+        return self._registered
 
-        self.hctx = self.wintab.WTOpenW(hwnd, byref(lc), True)
-        return bool(self.hctx)
-
-    def read_packet(self, serial):
-        if not self.hctx:
-            return None
-        pkt = PACKET()
-        if self.wintab.WTPacket(self.hctx, serial, byref(pkt)):
-            return pkt.pkNormalPressure
-        return None
-
-    def close(self):
-        if self.hctx:
-            self.wintab.WTClose(self.hctx)
-            self.hctx = None
+    def unregister(self):
+        if self._registered:
+            _user32.UnregisterHotKey(None, HOTKEY_TOGGLE_ID)
+            self._registered = False
 
 
-# ── Fallback: mouse-button detection ────────────────────────────────────────
+# ── Tray icon generation ─────────────────────────────────────────────────────
 
-class MouseFallback:
-    def __init__(self):
-        self.pressed = False
+_icon_cache = {}
 
-    def poll(self):
-        state = ctypes.windll.user32.GetAsyncKeyState(0x01)
-        currently_pressed = bool(state & 0x8000)
-        changed = currently_pressed != self.pressed
-        self.pressed = currently_pressed
-        return (1.0 if currently_pressed else 0.0, changed)
+def make_tray_icon(active):
+    if active in _icon_cache:
+        return _icon_cache[active]
+
+    pixmap = QPixmap(ICON_FILE)
+    if pixmap.isNull():
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(QColor(76, 175, 80) if active else QColor(158, 158, 158))
+
+    if not active:
+        grey = pixmap.toImage().convertToFormat(QImage.Format.Format_Grayscale8)
+        pixmap = QPixmap.fromImage(grey)
+
+    icon = QIcon(pixmap)
+    _icon_cache[active] = icon
+    return icon
+
+
+# ── Settings dialog ──────────────────────────────────────────────────────────
+
+DIALOG_STYLE = """
+QDialog { background: #f8f8f8; }
+QGroupBox {
+    font-weight: bold; border: 1px solid #ccc; border-radius: 6px;
+    margin-top: 14px; padding: 14px 10px 10px 10px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin; left: 12px; padding: 0 6px;
+}
+QPushButton {
+    padding: 5px 14px; border: 1px solid #bbb; border-radius: 4px;
+    background: #fff;
+}
+QPushButton:hover { background: #e8e8e8; }
+QSlider::groove:horizontal {
+    height: 6px; background: #ddd; border-radius: 3px;
+}
+QSlider::handle:horizontal {
+    width: 16px; margin: -5px 0; background: #4CAF50; border-radius: 8px;
+}
+QListWidget {
+    border: 1px solid #ccc; border-radius: 4px; background: #fff;
+}
+"""
+
+
+class HotkeyButton(QPushButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._sequence = QKeySequence()
+        self._recording = False
+        self._update_label()
+
+    def keySequence(self):
+        return self._sequence
+
+    def setKeySequence(self, seq):
+        self._sequence = seq
+        self._recording = False
+        self._update_label()
+
+    def clear(self):
+        self._sequence = QKeySequence()
+        self._recording = False
+        self._update_label()
+
+    def _update_label(self):
+        if self._recording:
+            self.setText("Press a key combo...")
+        elif self._sequence.isEmpty():
+            self.setText("Click to set")
+        else:
+            self.setText(self._sequence.toString())
+
+    def mousePressEvent(self, event):
+        self._recording = True
+        self._update_label()
+        self.setFocus()
+
+    def keyPressEvent(self, event):
+        if not self._recording:
+            return super().keyPressEvent(event)
+        key = event.key()
+        if key in (Qt.Key.Key_Control, Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+            return
+        self._sequence = QKeySequence(event.keyCombination())
+        self._recording = False
+        self._update_label()
+        if hasattr(self, "sequenceChanged"):
+            self.sequenceChanged(self._sequence)
+
+    def focusOutEvent(self, event):
+        self._recording = False
+        self._update_label()
+        super().focusOutEvent(event)
+
+
+class SettingsDialog(QDialog):
+    def __init__(self, app_ref, parent=None):
+        super().__init__(parent)
+        self.app_ref = app_ref
+        self.settings = app_ref.settings
+        self.setWindowTitle(f"{APP_NAME} - Settings")
+        self.setWindowIcon(make_tray_icon(True))
+        self.setMinimumWidth(440)
+        self.setStyleSheet(DIALOG_STYLE)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        self._build_ui()
+        print("[settings] dialog created ok", flush=True)
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setSpacing(6)
+
+        input_group = QGroupBox("Input Mode")
+        il = QVBoxLayout()
+        self._radio_tablet = QRadioButton("Tablet — pen pressure sensitive")
+        self._radio_mouse = QRadioButton("Mouse — click to play (no pressure)")
+        il.addWidget(self._radio_tablet)
+        il.addWidget(self._radio_mouse)
+        input_group.setLayout(il)
+        root.addWidget(input_group)
+
+        sound_group = QGroupBox("Sound Files")
+        sl = QVBoxLayout()
+        self._file_list = QListWidget()
+        self._file_list.setMinimumHeight(100)
+        sl.addWidget(self._file_list)
+        btn_row = QHBoxLayout()
+        self._btn_add = QPushButton("Add Files")
+        self._btn_remove = QPushButton("Remove")
+        self._btn_folder = QPushButton("Open Folder")
+        btn_row.addWidget(self._btn_add)
+        btn_row.addWidget(self._btn_remove)
+        btn_row.addWidget(self._btn_folder)
+        sl.addLayout(btn_row)
+        sound_group.setLayout(sl)
+        root.addWidget(sound_group)
+
+        vol_group = QGroupBox("Volume")
+        vl = QHBoxLayout()
+        vl.addWidget(QLabel("Max"))
+        self._vol_slider = QSlider(Qt.Orientation.Horizontal)
+        self._vol_slider.setRange(5, 100)
+        vl.addWidget(self._vol_slider)
+        self._vol_label = QLabel("80%")
+        self._vol_label.setFixedWidth(40)
+        vl.addWidget(self._vol_label)
+        vol_group.setLayout(vl)
+        root.addWidget(vol_group)
+
+        hk_group = QGroupBox("Hotkey")
+        hl = QHBoxLayout()
+        hl.addWidget(QLabel("Pause / Resume"))
+        self._hotkey_btn = HotkeyButton()
+        self._hotkey_btn.setMinimumWidth(160)
+        hl.addWidget(self._hotkey_btn)
+        self._btn_clear_hk = QPushButton("Clear")
+        hl.addWidget(self._btn_clear_hk)
+        hk_group.setLayout(hl)
+        root.addWidget(hk_group)
+
+        self._radio_tablet.toggled.connect(self._on_input_mode)
+        self._btn_add.clicked.connect(self._add_files)
+        self._btn_remove.clicked.connect(self._remove_file)
+        self._btn_folder.clicked.connect(self._open_folder)
+        self._vol_slider.valueChanged.connect(self._on_volume)
+        self._hotkey_btn.sequenceChanged = self._on_hotkey
+        self._btn_clear_hk.clicked.connect(self._clear_hotkey)
+
+    def _load_current(self):
+        if self.settings.input_mode == "mouse":
+            self._radio_mouse.setChecked(True)
+        else:
+            self._radio_tablet.setChecked(True)
+        self._refresh_file_list()
+        self._vol_slider.setValue(self.settings.max_volume)
+        self._vol_label.setText(f"{self.settings.max_volume}%")
+        if self.settings.pause_hotkey:
+            self._hotkey_btn.setKeySequence(QKeySequence.fromString(self.settings.pause_hotkey))
+
+    def _refresh_file_list(self):
+        self._file_list.clear()
+        for f in find_sound_files():
+            self._file_list.addItem(os.path.basename(f))
+
+    def _on_input_mode(self, checked):
+        mode = "tablet" if self._radio_tablet.isChecked() else "mouse"
+        self.settings.input_mode = mode
+        self.settings.save()
+        self.app_ref._pen_hook.raw_mouse_mode = (mode == "mouse")
+        print(f"[settings] input mode -> {mode}", flush=True)
+
+    def _add_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Add Sound Files", "",
+            "Audio Files (*.mp3 *.wav *.ogg);;All Files (*)",
+        )
+        if not files:
+            return
+        os.makedirs(SOUND_DIR, exist_ok=True)
+        for f in files:
+            dest = os.path.join(SOUND_DIR, os.path.basename(f))
+            if not os.path.exists(dest):
+                shutil.copy2(f, dest)
+        self._refresh_file_list()
+        self.app_ref.reload_playlist()
+
+    def _remove_file(self):
+        item = self._file_list.currentItem()
+        if not item:
+            return
+        path = os.path.join(SOUND_DIR, item.text())
+        if os.path.exists(path):
+            os.remove(path)
+        self._refresh_file_list()
+        self.app_ref.reload_playlist()
+
+    def _open_folder(self):
+        os.makedirs(SOUND_DIR, exist_ok=True)
+        os.startfile(SOUND_DIR)
+
+    def _on_volume(self, val):
+        self._vol_label.setText(f"{val}%")
+        self.settings.max_volume = val
+        self.settings.save()
+        self.app_ref.max_volume = val / 100.0
+
+    def _on_hotkey(self, seq):
+        seq_str = seq.toString()
+        self.settings.pause_hotkey = seq_str
+        self.settings.save()
+        ok = self.app_ref.hotkey_mgr.register(seq_str)
+        status = "registered" if ok else "failed"
+        print(f"[settings] hotkey -> {seq_str} ({status})", flush=True)
+
+    def _clear_hotkey(self):
+        self._hotkey_btn.clear()
+        self.settings.pause_hotkey = ""
+        self.settings.save()
+        self.app_ref.hotkey_mgr.unregister()
+        print("[settings] hotkey cleared", flush=True)
 
 
 # ── Main application ─────────────────────────────────────────────────────────
 
 class PenASMR:
-    def __init__(self, sound_path=DEFAULT_SOUND):
+    def __init__(self, sound_path=None):
         self.sound_path = sound_path
-        self.monitoring = False
-        self.running = False
-        self.hwnd = None
-        self.wintab = WinTabManager()
+        self.settings = Settings()
+        self.playlist = []
+        self.monitoring = True
         self.audio = None
-        self.fallback = None
-        self.use_fallback = False
         self.tray_icon = None
-        self._wndproc_ref = None
-        self._msg_thread = None
+        self.qt_app = None
+        self._pen_hook = None
+        self._poll_timer = None
+        self._was_down = False
+        self._settings_dialog = None
+        self.hotkey_mgr = None
+        self.max_volume = self.settings.max_volume / 100.0
 
     def _ensure_sound(self):
-        if not os.path.exists(self.sound_path):
-            if os.path.exists(BUNDLED_SOUND):
-                self.sound_path = BUNDLED_SOUND
-            else:
-                generate_placeholder_wav(self.sound_path)
-
-    def _create_window(self):
-        hInstance = kernel32.GetModuleHandleW(None)
-        class_name = "PenASMR_Hidden"
-
-        self._wndproc_ref = WNDPROC(self._wnd_proc)
-
-        wc = WNDCLASSEXW()
-        wc.cbSize = sizeof(WNDCLASSEXW)
-        wc.lpfnWndProc = self._wndproc_ref
-        wc.hInstance = hInstance
-        wc.lpszClassName = class_name
-
-        user32.RegisterClassExW(byref(wc))
-
-        self.hwnd = user32.CreateWindowExW(
-            WS_EX_TOOLWINDOW, class_name, "PenASMR", WS_OVERLAPPED,
-            0, 0, 1, 1, None, None, hInstance, None,
-        )
-        user32.RegisterHotKey(self.hwnd, HOTKEY_TOGGLE, MOD_CONTROL | MOD_SHIFT, 0x50)
-
-    def _wnd_proc(self, hwnd, msg, wParam, lParam):
-        if msg == WT_PACKET and self.monitoring:
-            pressure_raw = self.wintab.read_packet(wParam)
-            if pressure_raw is not None:
-                self._handle_pressure(pressure_raw)
-            return 0
-
-        if msg == WM_HOTKEY and wParam == HOTKEY_TOGGLE:
-            self.toggle()
-            return 0
-
-        if msg == WM_TIMER and wParam == TIMER_ID and self.use_fallback and self.monitoring:
-            pressure, changed = self.fallback.poll()
-            if changed:
-                self._handle_pressure(int(pressure * self.wintab.max_pressure))
-            return 0
-
-        if msg == WM_QUIT_APP:
-            user32.PostQuitMessage(0)
-            return 0
-
-        if msg == WM_DESTROY:
-            user32.PostQuitMessage(0)
-            return 0
-
-        return user32.DefWindowProcW(hwnd, msg, wParam, lParam)
-
-    def _handle_pressure(self, pressure_raw):
-        if pressure_raw > 0:
-            volume = max(0.15, min(1.0, pressure_raw / self.wintab.max_pressure))
-            self.audio.play(volume)
+        if self.sound_path and os.path.exists(self.sound_path):
+            self.playlist = [self.sound_path]
+            return
+        found = find_sound_files()
+        if found:
+            self.playlist = found
         else:
+            generate_placeholder_wav(FALLBACK_WAV)
+            self.playlist = [FALLBACK_WAV]
+
+    def reload_playlist(self):
+        if self.audio:
             self.audio.stop()
+            pygame.mixer.music.stop()
+        found = find_sound_files()
+        if found:
+            self.playlist = found
+        else:
+            generate_placeholder_wav(FALLBACK_WAV)
+            self.playlist = [FALLBACK_WAV]
+        self.audio = AudioManager(self.playlist)
+        print(f"[playlist] reloaded - {len(self.playlist)} file(s)", flush=True)
+
+    def handle_pressure(self, normalized):
+        volume = MIN_VOLUME + normalized * (self.max_volume - MIN_VOLUME)
+        volume = max(MIN_VOLUME, min(self.max_volume, volume))
+        self.audio.play(volume)
+
+    def handle_release(self):
+        self.audio.stop()
+
+    def _poll_pen(self):
+        if not self.monitoring:
+            if self._was_down:
+                self._was_down = False
+                self.handle_release()
+            return
+
+        if self._pen_hook.pen_down:
+            raw = self._pen_hook.pressure
+            normalized = max(0.0, min(1.0, raw / TABLET_MAX_PRESSURE))
+            self.handle_pressure(normalized)
+            if not self._was_down:
+                self._was_down = True
+
+        elif self._was_down:
+            self._was_down = False
+            self.handle_release()
 
     def toggle(self):
         self.monitoring = not self.monitoring
         if not self.monitoring and self.audio:
             self.audio.stop()
         self._update_tray()
+        print(f"[{APP_NAME}] {'ON' if self.monitoring else 'PAUSED'}", flush=True)
 
     def _update_tray(self):
         if self.tray_icon:
-            self.tray_icon.icon = make_tray_icon(self.monitoring)
+            self.tray_icon.setIcon(make_tray_icon(self.monitoring))
             status = "ON" if self.monitoring else "OFF"
-            self.tray_icon.title = f"{APP_NAME} — {status}"
-            self.tray_icon.update_menu()
+            self.tray_icon.setToolTip(f"{APP_NAME} — {status}")
 
-    def _on_tray_toggle(self, icon, item):
-        self.toggle()
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.toggle()
 
-    def _on_tray_quit(self, icon, item):
-        icon.stop()
-        if self.hwnd:
-            user32.PostMessageW(self.hwnd, WM_QUIT_APP, 0, 0)
+    def _show_settings(self):
+        QTimer.singleShot(0, self._open_settings_deferred)
 
-    def _get_toggle_text(self, item):
-        return "Pause" if self.monitoring else "Resume"
+    def _open_settings_deferred(self):
+        try:
+            if self._settings_dialog is None:
+                self._settings_dialog = SettingsDialog(self)
+            self._settings_dialog._load_current()
+            self._settings_dialog.show()
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+        except Exception as e:
+            print(f"[error] Settings dialog: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
 
     def _build_tray(self):
-        menu = pystray.Menu(
-            pystray.MenuItem(self._get_toggle_text, self._on_tray_toggle, default=True),
-            pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", self._on_tray_quit),
-        )
-        self.tray_icon = pystray.Icon(
-            APP_NAME,
-            icon=make_tray_icon(True),
-            title=f"{APP_NAME} — ON",
-            menu=menu,
-        )
+        menu = QMenu()
 
-    def _run_message_loop(self):
-        self._create_window()
+        self._toggle_action = QAction("Pause", menu)
+        self._toggle_action.triggered.connect(lambda: self.toggle())
+        menu.addAction(self._toggle_action)
+        menu.aboutToShow.connect(self._update_menu_text)
 
-        if self.wintab.available and self.wintab.open_context(self.hwnd):
-            self.use_fallback = False
-        else:
-            self.fallback = MouseFallback()
-            self.use_fallback = True
-            user32.SetTimer(self.hwnd, TIMER_ID, 16, None)
+        settings_action = QAction("Settings", menu)
+        settings_action.triggered.connect(self._show_settings)
+        menu.addAction(settings_action)
 
-        self.monitoring = True
-        self.running = True
-        self._update_tray()
+        menu.addSeparator()
 
-        msg = wintypes.MSG()
-        while self.running:
-            ret = user32.GetMessageW(byref(msg), None, 0, 0)
-            if ret == 0 or ret == -1:
-                break
-            user32.TranslateMessage(byref(msg))
-            user32.DispatchMessageW(byref(msg))
+        website_action = QAction(APP_URL.removeprefix("https://"), menu)
+        website_action.triggered.connect(lambda: os.startfile(APP_URL))
+        menu.addAction(website_action)
 
-        self._cleanup()
+        quit_action = QAction("Quit", menu)
+        quit_action.triggered.connect(self._quit)
+        menu.addAction(quit_action)
 
-    def run(self):
-        self._ensure_sound()
-        self.audio = AudioManager(self.sound_path)
-        self._build_tray()
+        self.tray_icon = QSystemTrayIcon()
+        self.tray_icon.setIcon(make_tray_icon(True))
+        self.tray_icon.setToolTip(f"{APP_NAME} — ON")
+        self.tray_icon.setContextMenu(menu)
+        self.tray_icon.activated.connect(self._on_tray_activated)
+        self.tray_icon.show()
 
-        self._msg_thread = threading.Thread(target=self._run_message_loop, daemon=True)
-        self._msg_thread.start()
+    def _update_menu_text(self):
+        self._toggle_action.setText("Pause" if self.monitoring else "Resume")
 
-        self.tray_icon.run()
-
-        self._msg_thread.join(timeout=3)
-
-    def _cleanup(self):
-        self.running = False
-        self.monitoring = False
+    def _quit(self):
+        if self.hotkey_mgr:
+            self.hotkey_mgr.unregister()
+        if self._pen_hook:
+            self._pen_hook.uninstall()
         if self.audio:
             self.audio.stop()
             self.audio.cleanup()
-        self.wintab.close()
-        if self.hwnd:
-            user32.UnregisterHotKey(self.hwnd, HOTKEY_TOGGLE)
-            user32.KillTimer(self.hwnd, TIMER_ID)
-            user32.DestroyWindow(self.hwnd)
+        self.qt_app.quit()
+
+    def run(self):
+        seed_bundled_sounds()
+        print(f"[{APP_NAME}] Data: {DATA_DIR} ({'portable' if PORTABLE else 'appdata'})", flush=True)
+        self._ensure_sound()
+        print(f"[{APP_NAME}] Playlist: {len(self.playlist)} file(s)", flush=True)
+        for i, f in enumerate(self.playlist):
+            print(f"  {i + 1}. {os.path.basename(f)}", flush=True)
+
+        self.audio = AudioManager(self.playlist)
+
+        def _excepthook(exc_type, exc_value, exc_tb):
+            import traceback
+            print("[EXCEPTION]", flush=True)
+            traceback.print_exception(exc_type, exc_value, exc_tb)
+        sys.excepthook = _excepthook
+
+        self.qt_app = QApplication(sys.argv)
+        self.qt_app.setQuitOnLastWindowClosed(False)
+
+        self.hotkey_mgr = HotkeyManager(self.toggle)
+        self.hotkey_mgr.start_polling()
+        if self.settings.pause_hotkey:
+            ok = self.hotkey_mgr.register(self.settings.pause_hotkey)
+            hk = self.settings.pause_hotkey
+            print(f"[{APP_NAME}] Hotkey: {hk} ({'ok' if ok else 'failed'})", flush=True)
+
+        self._pen_hook = PenInputHook()
+        self._pen_hook.raw_mouse_mode = (self.settings.input_mode == "mouse")
+        if self._pen_hook.install():
+            mode = self.settings.input_mode
+            print(f"[{APP_NAME}] Input: {mode} mode", flush=True)
+        else:
+            print(f"[{APP_NAME}] WARNING: hook install failed", flush=True)
+
+        self._poll_timer = QTimer()
+        self._poll_timer.timeout.connect(self._poll_pen)
+        self._poll_timer.start(8)
+
+        self._build_tray()
+
+        print(f"[{APP_NAME}] Running - max volume {self.settings.max_volume}%", flush=True)
+        self.qt_app.exec()
 
 
 if __name__ == "__main__":
-    sound = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_SOUND
+    sound = sys.argv[1] if len(sys.argv) > 1 else None
     app = PenASMR(sound_path=sound)
     app.run()

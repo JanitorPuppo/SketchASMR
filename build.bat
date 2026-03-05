@@ -3,7 +3,7 @@ setlocal
 
 echo.
 echo ============================================
-echo   Building DrawTablet ASMR
+echo   Building SketchASMR
 echo ============================================
 echo.
 
@@ -22,8 +22,11 @@ pyinstaller ^
     --noconfirm ^
     --onefile ^
     --windowed ^
-    --name "DrawTablet ASMR" ^
+    --name "SketchASMR" ^
     --add-data "sounds;sounds" ^
+    --add-data "icon.png;." ^
+    --icon "icon.ico" ^
+    --hidden-import PyQt6.sip ^
     pen_asmr.py
 
 if errorlevel 1 (
@@ -36,7 +39,7 @@ if errorlevel 1 (
 echo.
 echo ============================================
 echo   Build complete!
-echo   Output: dist\DrawTablet ASMR.exe
+echo   Output: dist\SketchASMR.exe
 echo ============================================
 echo.
 pause
