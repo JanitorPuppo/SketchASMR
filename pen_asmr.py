@@ -453,6 +453,167 @@ class RawPenDetector:
             self._hwnd = None
 
 
+# ── WinTab pen detection ─────────────────────────────────────────────────────
+
+WT_PACKET = 0x7FF0
+WTI_DEFSYSCTX = 4
+WTI_DEVICES = 100
+DVC_NPRESSURE = 18
+CXO_SYSTEM = 0x0001
+CXO_MESSAGES = 0x0004
+PK_NORMAL_PRESSURE = 0x0400
+
+
+class LOGCONTEXTA(Structure):
+    _fields_ = [
+        ("lcName", ctypes.c_char * 40),
+        ("lcOptions", ctypes.c_uint),
+        ("lcStatus", ctypes.c_uint),
+        ("lcLocks", ctypes.c_uint),
+        ("lcMsgBase", ctypes.c_uint),
+        ("lcDevice", ctypes.c_uint),
+        ("lcPktRate", ctypes.c_uint),
+        ("lcPktData", ctypes.c_uint),
+        ("lcPktMode", ctypes.c_uint),
+        ("lcMoveMask", ctypes.c_uint),
+        ("lcBtnDnMask", ctypes.c_uint32),
+        ("lcBtnUpMask", ctypes.c_uint32),
+        ("lcInOrgX", ctypes.c_long),
+        ("lcInOrgY", ctypes.c_long),
+        ("lcInOrgZ", ctypes.c_long),
+        ("lcInExtX", ctypes.c_long),
+        ("lcInExtY", ctypes.c_long),
+        ("lcInExtZ", ctypes.c_long),
+        ("lcOutOrgX", ctypes.c_long),
+        ("lcOutOrgY", ctypes.c_long),
+        ("lcOutOrgZ", ctypes.c_long),
+        ("lcOutExtX", ctypes.c_long),
+        ("lcOutExtY", ctypes.c_long),
+        ("lcOutExtZ", ctypes.c_long),
+        ("lcSensX", ctypes.c_uint32),
+        ("lcSensY", ctypes.c_uint32),
+        ("lcSensZ", ctypes.c_uint32),
+        ("lcSysMode", ctypes.c_int),
+        ("lcSysOrgX", ctypes.c_int),
+        ("lcSysOrgY", ctypes.c_int),
+        ("lcSysExtX", ctypes.c_int),
+        ("lcSysExtY", ctypes.c_int),
+        ("lcSysSensX", ctypes.c_uint32),
+        ("lcSysSensY", ctypes.c_uint32),
+    ]
+
+
+class AXIS(Structure):
+    _fields_ = [
+        ("axMin", ctypes.c_long),
+        ("axMax", ctypes.c_long),
+        ("axUnits", ctypes.c_uint),
+        ("axResolution", ctypes.c_uint32),
+    ]
+
+
+class WINTAB_PACKET(Structure):
+    _fields_ = [("pkNormalPressure", ctypes.c_uint)]
+
+
+class WinTabDetector:
+    def __init__(self):
+        self._wintab = None
+        self._ctx = None
+        self._hwnd = None
+        self._wndproc_ref = None
+        self.pen_down = False
+        self.pressure = 0
+        self.max_pressure = 1024
+
+    def start(self):
+        try:
+            self._wintab = ctypes.WinDLL("wintab32")
+        except OSError:
+            print("[wintab] wintab32.dll not found", flush=True)
+            return False
+
+        self._wintab.WTInfoA.argtypes = [
+            ctypes.c_uint, ctypes.c_uint, ctypes.c_void_p,
+        ]
+        self._wintab.WTInfoA.restype = ctypes.c_uint
+        self._wintab.WTOpenA.argtypes = [
+            wintypes.HWND, ctypes.c_void_p, wintypes.BOOL,
+        ]
+        self._wintab.WTOpenA.restype = ctypes.c_void_p
+        self._wintab.WTClose.argtypes = [ctypes.c_void_p]
+        self._wintab.WTClose.restype = wintypes.BOOL
+        self._wintab.WTPacket.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p,
+        ]
+        self._wintab.WTPacket.restype = wintypes.BOOL
+
+        axis = AXIS()
+        if self._wintab.WTInfoA(WTI_DEVICES, DVC_NPRESSURE, byref(axis)):
+            self.max_pressure = max(axis.axMax, 1)
+            print(f"[wintab] pressure range: 0-{self.max_pressure}", flush=True)
+
+        ctx = LOGCONTEXTA()
+        if not self._wintab.WTInfoA(WTI_DEFSYSCTX, 0, byref(ctx)):
+            print("[wintab] no tablet found", flush=True)
+            return False
+
+        ctx.lcName = b"SketchASMR"
+        ctx.lcOptions |= CXO_SYSTEM | CXO_MESSAGES
+        ctx.lcPktData = PK_NORMAL_PRESSURE
+        ctx.lcMoveMask = PK_NORMAL_PRESSURE
+        ctx.lcBtnDnMask = 0xFFFFFFFF
+        ctx.lcBtnUpMask = 0xFFFFFFFF
+
+        def wndproc(hwnd, msg, wParam, lParam):
+            if msg == WT_PACKET:
+                self._on_packet(wParam, lParam)
+            return _user32.DefWindowProcW(hwnd, msg, wParam, lParam)
+
+        self._wndproc_ref = WNDPROC_TYPE(wndproc)
+        hInst = _kernel32.GetModuleHandleW(None)
+
+        wc = WNDCLASSEXW()
+        wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+        wc.lpfnWndProc = self._wndproc_ref
+        wc.hInstance = hInst
+        wc.lpszClassName = "SketchASMR_WinTab"
+        _user32.RegisterClassExW(byref(wc))
+
+        self._hwnd = _user32.CreateWindowExW(
+            0, "SketchASMR_WinTab", "", 0,
+            0, 0, 0, 0,
+            None, None, hInst, None,
+        )
+        if not self._hwnd:
+            print("[wintab] failed to create window", flush=True)
+            return False
+
+        self._ctx = self._wintab.WTOpenA(self._hwnd, byref(ctx), True)
+        if not self._ctx:
+            print("[wintab] failed to open context", flush=True)
+            _user32.DestroyWindow(self._hwnd)
+            self._hwnd = None
+            return False
+
+        print("[wintab] system context opened", flush=True)
+        return True
+
+    def _on_packet(self, serial, hCtx):
+        pkt = WINTAB_PACKET()
+        if self._wintab.WTPacket(self._ctx, serial, byref(pkt)):
+            self.pressure = pkt.pkNormalPressure
+            self.pen_down = pkt.pkNormalPressure > 0
+
+    def stop(self):
+        if self._ctx:
+            self._wintab.WTClose(self._ctx)
+            self._ctx = None
+        if self._hwnd:
+            _user32.DestroyWindow(self._hwnd)
+            self._hwnd = None
+
+
 # ── Global hotkey (RegisterHotKey) ────────────────────────────────────────────
 
 WM_HOTKEY = 0x0312
@@ -823,6 +984,7 @@ class PenASMR:
         self.qt_app = None
         self._pen_hook = None
         self._pen_detector = None
+        self._wintab = None
         self._poll_timer = None
         self._was_down = False
         self._settings_dialog = None
@@ -868,13 +1030,18 @@ class PenASMR:
                 self.handle_release()
             return
 
-        if self._pen_hook.pen_down:
+        wt = self._wintab
+        if wt and wt.pen_down:
+            normalized = max(0.0, min(1.0, wt.pressure / wt.max_pressure))
+            self.handle_pressure(normalized)
+            if not self._was_down:
+                self._was_down = True
+        elif self._pen_hook.pen_down:
             raw = self._pen_hook.pressure
             normalized = max(0.0, min(1.0, raw / TABLET_MAX_PRESSURE))
             self.handle_pressure(normalized)
             if not self._was_down:
                 self._was_down = True
-
         elif self._was_down:
             self._was_down = False
             self.handle_release()
@@ -951,6 +1118,8 @@ class PenASMR:
             self._pen_hook.uninstall()
         if hasattr(self, "_pen_detector") and self._pen_detector:
             self._pen_detector.stop()
+        if hasattr(self, "_wintab") and self._wintab:
+            self._wintab.stop()
         if self.audio:
             self.audio.stop()
             self.audio.cleanup()
@@ -986,6 +1155,10 @@ class PenASMR:
 
         self._pen_detector = RawPenDetector()
         self._pen_detector.start()
+
+        self._wintab = WinTabDetector()
+        if not self._wintab.start():
+            self._wintab = None
 
         self._pen_hook = PenInputHook()
         self._pen_hook.raw_mouse_mode = (self.settings.input_mode == "mouse")
