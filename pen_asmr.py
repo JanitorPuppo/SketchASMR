@@ -43,6 +43,29 @@ APP_NAME = "SketchASMR"
 APP_AUTHOR = "janitorpuppo"
 APP_URL = "https://janitor.gg"
 MIN_VOLUME = 0.05
+MUTEX_NAME = "Global\\SketchASMR_SingleInstance"
+
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+_kernel32.CreateMutexW.restype = wintypes.HANDLE
+_kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+_kernel32.CloseHandle.restype = wintypes.BOOL
+ERROR_ALREADY_EXISTS = 183
+
+_instance_mutex = None
+
+def acquire_single_instance():
+    global _instance_mutex
+    _instance_mutex = _kernel32.CreateMutexW(None, True, MUTEX_NAME)
+    if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+        print(f"[{APP_NAME}] Already running - exiting.", flush=True)
+        sys.exit(0)
+
+def release_single_instance():
+    global _instance_mutex
+    if _instance_mutex:
+        _kernel32.CloseHandle(_instance_mutex)
+        _instance_mutex = None
 
 
 # ── Settings persistence ─────────────────────────────────────────────────────
@@ -774,9 +797,11 @@ class PenASMR:
         if self.audio:
             self.audio.stop()
             self.audio.cleanup()
+        release_single_instance()
         self.qt_app.quit()
 
     def run(self):
+        acquire_single_instance()
         seed_bundled_sounds()
         print(f"[{APP_NAME}] Data: {DATA_DIR} ({'portable' if PORTABLE else 'appdata'})", flush=True)
         self._ensure_sound()
