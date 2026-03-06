@@ -1,5 +1,17 @@
 import os
 import sys
+
+if getattr(sys, "frozen", False):
+    _log_path = os.path.join(os.path.dirname(sys.executable), "sketch_asmr.log")
+    try:
+        _log_fh = open(_log_path, "w", encoding="utf-8", buffering=1)
+        sys.stdout = _log_fh
+        sys.stderr = _log_fh
+    except Exception:
+        pass
+
+print("[boot] imports starting", flush=True)
+
 import json
 import wave
 import math
@@ -8,7 +20,10 @@ import array
 import random
 import shutil
 import ctypes
+import threading
 from ctypes import wintypes, Structure, byref, POINTER as CPTR
+
+print("[boot] stdlib done", flush=True)
 
 os.environ["QT_WINTAB_ENABLED"] = "0"
 
@@ -21,6 +36,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QIcon, QImage, QPixmap, QColor, QAction, QKeySequence
 from PyQt6.QtCore import Qt, QTimer
 
+print("[boot] pygame + PyQt6 done", flush=True)
 
 if getattr(sys, "frozen", False):
     EXE_DIR = os.path.dirname(sys.executable)
@@ -40,6 +56,7 @@ ICON_FILE = os.path.join(BUNDLE_DIR, "icon.png")
 FALLBACK_WAV = os.path.join(SOUND_DIR, "writing.wav")
 SUPPORTED_AUDIO_EXT = (".mp3", ".wav", ".ogg")
 CONFIG_FILE = os.path.join(DATA_DIR, "settings.json")
+LOG_FILE = os.path.join(DATA_DIR, "log.txt")
 APP_NAME = "SketchASMR"
 APP_AUTHOR = "janitorpuppo"
 APP_URL = "https://janitor.gg"
@@ -315,7 +332,6 @@ WM_INPUT = 0x00FF
 RIDEV_INPUTSINK = 0x00000100
 RIM_TYPEHID = 2
 RID_INPUT = 0x10000003
-RIDI_PREPARSEDDATA = 0x20000005
 HID_USAGE_PAGE_DIGITIZER = 0x0D
 HID_USAGE_DIGITIZER_PEN = 0x02
 
@@ -335,39 +351,12 @@ class RAWINPUTHEADER(Structure):
         ("wParam", ctypes.c_size_t),
     ]
 
-WNDPROC_TYPE = ctypes.WINFUNCTYPE(
-    ctypes.c_longlong, wintypes.HWND, ctypes.c_uint,
-    ctypes.c_size_t, ctypes.c_ssize_t,
-)
-
-class WNDCLASSEXW(Structure):
-    _fields_ = [
-        ("cbSize", ctypes.c_uint),
-        ("style", ctypes.c_uint),
-        ("lpfnWndProc", WNDPROC_TYPE),
-        ("cbClsExtra", ctypes.c_int),
-        ("cbWndExtra", ctypes.c_int),
-        ("hInstance", wintypes.HINSTANCE),
-        ("hIcon", wintypes.HICON),
-        ("hCursor", wintypes.HANDLE),
-        ("hbrBackground", wintypes.HANDLE),
-        ("lpszMenuName", wintypes.LPCWSTR),
-        ("lpszClassName", wintypes.LPCWSTR),
-        ("hIconSm", wintypes.HICON),
-    ]
-
-_user32.RegisterClassExW.argtypes = [CPTR(WNDCLASSEXW)]
-_user32.RegisterClassExW.restype = wintypes.ATOM
 _user32.CreateWindowExW.argtypes = [
     ctypes.c_uint32, wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_uint32,
     ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
     wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, ctypes.c_void_p,
 ]
 _user32.CreateWindowExW.restype = wintypes.HWND
-_user32.DefWindowProcW.argtypes = [
-    wintypes.HWND, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t,
-]
-_user32.DefWindowProcW.restype = ctypes.c_longlong
 _user32.DestroyWindow.argtypes = [wintypes.HWND]
 _user32.DestroyWindow.restype = wintypes.BOOL
 _user32.RegisterRawInputDevices.argtypes = [
@@ -382,35 +371,20 @@ _user32.GetRawInputData.restype = ctypes.c_uint
 _kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
 _kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
-HWND_MESSAGE = -3
+print("[boot] ctypes structures defined", flush=True)
 
 
 class RawPenDetector:
     def __init__(self):
         self._last_pen_time = 0.0
         self._hwnd = None
-        self._wndproc_ref = None
 
     def start(self):
-        def wndproc(hwnd, msg, wParam, lParam):
-            if msg == WM_INPUT:
-                self._on_raw_input(lParam)
-            return _user32.DefWindowProcW(hwnd, msg, wParam, lParam)
-
-        self._wndproc_ref = WNDPROC_TYPE(wndproc)
         hInst = _kernel32.GetModuleHandleW(None)
-
-        wc = WNDCLASSEXW()
-        wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
-        wc.lpfnWndProc = self._wndproc_ref
-        wc.hInstance = hInst
-        wc.lpszClassName = "SketchASMR_RawPen"
-        _user32.RegisterClassExW(byref(wc))
-
         self._hwnd = _user32.CreateWindowExW(
-            0, "SketchASMR_RawPen", "", 0,
+            0, "STATIC", "", 0,
             0, 0, 0, 0,
-            HWND_MESSAGE, None, hInst, None,
+            None, None, hInst, None,
         )
         if not self._hwnd:
             print("[raw pen] failed to create window", flush=True)
@@ -427,22 +401,26 @@ class RawPenDetector:
         print(f"[raw pen] digitizer registered: {bool(ok)}", flush=True)
         return bool(ok)
 
-    def _on_raw_input(self, hRawInput):
-        size = ctypes.c_uint(0)
-        _user32.GetRawInputData(
-            hRawInput, RID_INPUT, None, byref(size),
-            ctypes.sizeof(RAWINPUTHEADER),
-        )
-        if size.value == 0:
-            return
-        buf = ctypes.create_string_buffer(size.value)
-        _user32.GetRawInputData(
-            hRawInput, RID_INPUT, buf, byref(size),
-            ctypes.sizeof(RAWINPUTHEADER),
-        )
-        header = RAWINPUTHEADER.from_buffer_copy(buf)
-        if header.dwType == RIM_TYPEHID:
-            self._last_pen_time = time.monotonic()
+    def poll(self):
+        msg = MSG()
+        while _user32.PeekMessageW(
+            byref(msg), self._hwnd, WM_INPUT, WM_INPUT, PM_REMOVE,
+        ):
+            size = ctypes.c_uint(0)
+            _user32.GetRawInputData(
+                msg.lParam, RID_INPUT, None, byref(size),
+                ctypes.sizeof(RAWINPUTHEADER),
+            )
+            if size.value == 0:
+                continue
+            buf = ctypes.create_string_buffer(size.value)
+            _user32.GetRawInputData(
+                msg.lParam, RID_INPUT, buf, byref(size),
+                ctypes.sizeof(RAWINPUTHEADER),
+            )
+            header = RAWINPUTHEADER.from_buffer_copy(buf)
+            if header.dwType == RIM_TYPEHID:
+                self._last_pen_time = time.monotonic()
 
     def is_pen_recent(self, threshold_s=0.15):
         return (time.monotonic() - self._last_pen_time) < threshold_s
@@ -455,7 +433,6 @@ class RawPenDetector:
 
 # ── WinTab pen detection ─────────────────────────────────────────────────────
 
-WT_PACKET = 0x7FF0
 WTI_DEFSYSCTX = 4
 WTI_DEVICES = 100
 DVC_NPRESSURE = 18
@@ -521,7 +498,6 @@ class WinTabDetector:
         self._wintab = None
         self._ctx = None
         self._hwnd = None
-        self._wndproc_ref = None
         self.pen_down = False
         self.pressure = 0
         self.max_pressure = 1024
@@ -543,10 +519,10 @@ class WinTabDetector:
         self._wintab.WTOpenA.restype = ctypes.c_void_p
         self._wintab.WTClose.argtypes = [ctypes.c_void_p]
         self._wintab.WTClose.restype = wintypes.BOOL
-        self._wintab.WTPacket.argtypes = [
-            ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p,
+        self._wintab.WTPacketsGet.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p,
         ]
-        self._wintab.WTPacket.restype = wintypes.BOOL
+        self._wintab.WTPacketsGet.restype = ctypes.c_int
 
         axis = AXIS()
         if self._wintab.WTInfoA(WTI_DEVICES, DVC_NPRESSURE, byref(axis)):
@@ -559,29 +535,13 @@ class WinTabDetector:
             return False
 
         ctx.lcName = b"SketchASMR"
-        ctx.lcOptions |= CXO_SYSTEM | CXO_MESSAGES
+        ctx.lcOptions |= CXO_SYSTEM
         ctx.lcPktData = PK_NORMAL_PRESSURE
         ctx.lcMoveMask = PK_NORMAL_PRESSURE
-        ctx.lcBtnDnMask = 0xFFFFFFFF
-        ctx.lcBtnUpMask = 0xFFFFFFFF
 
-        def wndproc(hwnd, msg, wParam, lParam):
-            if msg == WT_PACKET:
-                self._on_packet(wParam, lParam)
-            return _user32.DefWindowProcW(hwnd, msg, wParam, lParam)
-
-        self._wndproc_ref = WNDPROC_TYPE(wndproc)
         hInst = _kernel32.GetModuleHandleW(None)
-
-        wc = WNDCLASSEXW()
-        wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
-        wc.lpfnWndProc = self._wndproc_ref
-        wc.hInstance = hInst
-        wc.lpszClassName = "SketchASMR_WinTab"
-        _user32.RegisterClassExW(byref(wc))
-
         self._hwnd = _user32.CreateWindowExW(
-            0, "SketchASMR_WinTab", "", 0,
+            0, "STATIC", "", 0,
             0, 0, 0, 0,
             None, None, hInst, None,
         )
@@ -599,11 +559,18 @@ class WinTabDetector:
         print("[wintab] system context opened", flush=True)
         return True
 
-    def _on_packet(self, serial, hCtx):
-        pkt = WINTAB_PACKET()
-        if self._wintab.WTPacket(self._ctx, serial, byref(pkt)):
-            self.pressure = pkt.pkNormalPressure
-            self.pen_down = pkt.pkNormalPressure > 0
+    def poll(self):
+        if not self._ctx:
+            return
+        pkts = (WINTAB_PACKET * 32)()
+        n = self._wintab.WTPacketsGet(self._ctx, 32, byref(pkts))
+        if n > 0:
+            last = pkts[n - 1]
+            self.pressure = last.pkNormalPressure
+            self.pen_down = last.pkNormalPressure > 0
+        elif self.pen_down:
+            self.pen_down = False
+            self.pressure = 0
 
     def stop(self):
         if self._ctx:
@@ -673,6 +640,9 @@ class HotkeyManager:
         self.callback = callback
         self._registered = False
         self._timer = None
+        self._thread = None
+        self._triggered = threading.Event()
+        self._stop = threading.Event()
 
     def start_polling(self):
         self._timer = QTimer()
@@ -680,12 +650,21 @@ class HotkeyManager:
         self._timer.start(50)
 
     def _check_hotkey(self):
-        if not self._registered:
+        if self._triggered.is_set():
+            self._triggered.clear()
+            self.callback()
+
+    def _hotkey_thread(self, win_mods, vk):
+        ok = _user32.RegisterHotKey(None, HOTKEY_TOGGLE_ID, win_mods, vk)
+        if not ok:
             return
         msg = MSG()
-        while _user32.PeekMessageW(byref(msg), None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE):
-            if msg.wParam == HOTKEY_TOGGLE_ID:
-                self.callback()
+        while not self._stop.is_set():
+            while _user32.PeekMessageW(byref(msg), None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE):
+                if msg.wParam == HOTKEY_TOGGLE_ID:
+                    self._triggered.set()
+            time.sleep(0.05)
+        _user32.UnregisterHotKey(None, HOTKEY_TOGGLE_ID)
 
     def register(self, key_sequence_str):
         self.unregister()
@@ -713,13 +692,20 @@ class HotkeyManager:
         if not vk:
             return False
 
-        ok = _user32.RegisterHotKey(None, HOTKEY_TOGGLE_ID, win_mods, vk)
-        self._registered = bool(ok)
-        return self._registered
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._hotkey_thread, args=(win_mods, vk), daemon=True,
+        )
+        self._thread.start()
+        self._registered = True
+        return True
 
     def unregister(self):
         if self._registered:
-            _user32.UnregisterHotKey(None, HOTKEY_TOGGLE_ID)
+            self._stop.set()
+            if self._thread:
+                self._thread.join(timeout=1.0)
+                self._thread = None
             self._registered = False
 
 
@@ -1024,6 +1010,11 @@ class PenASMR:
         self.audio.stop()
 
     def _poll_pen(self):
+        if self._pen_detector:
+            self._pen_detector.poll()
+        if self._wintab:
+            self._wintab.poll()
+
         if not self.monitoring:
             if self._was_down:
                 self._was_down = False
@@ -1153,11 +1144,19 @@ class PenASMR:
             hk = self.settings.pause_hotkey
             print(f"[{APP_NAME}] Hotkey: {hk} ({'ok' if ok else 'failed'})", flush=True)
 
-        self._pen_detector = RawPenDetector()
-        self._pen_detector.start()
+        try:
+            self._pen_detector = RawPenDetector()
+            self._pen_detector.start()
+        except Exception as e:
+            print(f"[raw pen] init failed: {e}", flush=True)
+            self._pen_detector = None
 
-        self._wintab = WinTabDetector()
-        if not self._wintab.start():
+        try:
+            self._wintab = WinTabDetector()
+            if not self._wintab.start():
+                self._wintab = None
+        except Exception as e:
+            print(f"[wintab] init failed: {e}", flush=True)
             self._wintab = None
 
         self._pen_hook = PenInputHook()
@@ -1180,6 +1179,11 @@ class PenASMR:
 
 
 if __name__ == "__main__":
-    sound = sys.argv[1] if len(sys.argv) > 1 else None
-    app = PenASMR(sound_path=sound)
-    app.run()
+    try:
+        sound = sys.argv[1] if len(sys.argv) > 1 else None
+        app = PenASMR(sound_path=sound)
+        app.run()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)

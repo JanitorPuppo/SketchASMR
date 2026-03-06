@@ -1,8 +1,8 @@
 # SketchASMR
 
-A small Windows app that plays a "writing on paper" sound whenever your drawing tablet's pen touches the surface. Pen pressure controls the volume — light strokes are quiet, heavy strokes are loud.
+A small Windows app that plays a "writing on paper" sound (or any other audio files you want to play) whenever your drawing tablet's pen touches the surface. Pen pressure controls the volume — light strokes are quiet, heavy strokes are loud.
 
-Built for the **XPPen Artist 24 Pro** and compatible with any WinTab-supported tablet (Wacom, Huion, Gaomon, etc.).
+Built for any Windows Ink or WinTab-supported tablet (Wacom, Huion, Gaomon, etc.).
 
 ## For users
 
