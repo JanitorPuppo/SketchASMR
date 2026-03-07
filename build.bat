@@ -29,6 +29,7 @@ echo.
     --add-data "icon.png;." ^
     --icon "icon.ico" ^
     --hidden-import PyQt6.sip ^
+    --hidden-import yt_dlp ^
     pen_asmr.py
 
 if errorlevel 1 (

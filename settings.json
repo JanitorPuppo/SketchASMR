@@ -1,5 +1,10 @@
 {
-  "input_mode": "tablet",
+  "input_mode": "mouse",
   "max_volume": 100,
-  "pause_hotkey": "Ctrl+Shift+P"
+  "pause_hotkey": "Ctrl+Shift+P",
+  "excluded_files": [
+    "pencil drawing 2.mp3",
+    "pencil drawing.mp3"
+  ],
+  "urls": []
 }
