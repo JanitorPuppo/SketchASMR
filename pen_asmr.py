@@ -435,7 +435,7 @@ class RawPenDetector:
 
 WTI_DEFSYSCTX = 4
 WTI_DEVICES = 100
-DVC_NPRESSURE = 18
+DVC_NPRESSURE = 15
 CXO_SYSTEM = 0x0001
 CXO_MESSAGES = 0x0004
 PK_NORMAL_PRESSURE = 0x0400
@@ -524,15 +524,23 @@ class WinTabDetector:
         ]
         self._wintab.WTPacketsGet.restype = ctypes.c_int
 
-        axis = AXIS()
-        if self._wintab.WTInfoA(WTI_DEVICES, DVC_NPRESSURE, byref(axis)):
+        axis_size = self._wintab.WTInfoA(WTI_DEVICES, DVC_NPRESSURE, None)
+        if axis_size:
+            axis_buf = ctypes.create_string_buffer(max(axis_size, ctypes.sizeof(AXIS)))
+            self._wintab.WTInfoA(WTI_DEVICES, DVC_NPRESSURE, axis_buf)
+            axis = AXIS.from_buffer_copy(axis_buf[:ctypes.sizeof(AXIS)])
             self.max_pressure = max(axis.axMax, 1)
             print(f"[wintab] pressure range: 0-{self.max_pressure}", flush=True)
 
-        ctx = LOGCONTEXTA()
-        if not self._wintab.WTInfoA(WTI_DEFSYSCTX, 0, byref(ctx)):
+        ctx_size = self._wintab.WTInfoA(WTI_DEFSYSCTX, 0, None)
+        if not ctx_size:
             print("[wintab] no tablet found", flush=True)
             return False
+        print(f"[wintab] context size: driver={ctx_size} struct={ctypes.sizeof(LOGCONTEXTA)}", flush=True)
+
+        ctx_buf = ctypes.create_string_buffer(max(ctx_size, ctypes.sizeof(LOGCONTEXTA), 512))
+        self._wintab.WTInfoA(WTI_DEFSYSCTX, 0, ctx_buf)
+        ctx = LOGCONTEXTA.from_buffer_copy(ctx_buf[:ctypes.sizeof(LOGCONTEXTA)])
 
         ctx.lcName = b"SketchASMR"
         ctx.lcOptions |= CXO_SYSTEM
