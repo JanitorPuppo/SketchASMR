@@ -20,7 +20,10 @@ import array
 import random
 import shutil
 import ctypes
+import hashlib
+import zipfile
 import threading
+import urllib.request
 from ctypes import wintypes, Structure, byref, POINTER as CPTR
 
 print("[boot] stdlib done", flush=True)
@@ -30,11 +33,12 @@ os.environ["QT_WINTAB_ENABLED"] = "0"
 import pygame
 from PyQt6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QDialog, QVBoxLayout, QHBoxLayout,
-    QGroupBox, QRadioButton, QListWidget, QPushButton, QSlider, QLabel,
-    QFileDialog, QWidget,
+    QGroupBox, QRadioButton, QListWidget, QListWidgetItem, QPushButton,
+    QSlider, QLabel, QFileDialog, QWidget, QInputDialog, QMessageBox,
+    QProgressDialog,
 )
 from PyQt6.QtGui import QIcon, QImage, QPixmap, QColor, QAction, QKeySequence
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 
 print("[boot] pygame + PyQt6 done", flush=True)
 
@@ -51,6 +55,8 @@ PORTABLE = os.path.isdir(_local_sounds) or not getattr(sys, "frozen", False)
 DATA_DIR = EXE_DIR if PORTABLE else APPDATA_DIR
 
 SOUND_DIR = os.path.join(DATA_DIR, "sounds")
+CACHE_DIR = os.path.join(DATA_DIR, "cache")
+FFMPEG_DIR = os.path.join(DATA_DIR, "bin")
 BUNDLED_SOUND_DIR = os.path.join(BUNDLE_DIR, "sounds")
 ICON_FILE = os.path.join(BUNDLE_DIR, "icon.png")
 FALLBACK_WAV = os.path.join(SOUND_DIR, "writing.wav")
@@ -94,6 +100,7 @@ class Settings:
         "max_volume": 80,
         "pause_hotkey": "",
         "excluded_files": [],
+        "urls": [],
     }
 
     def __init__(self):
@@ -147,6 +154,14 @@ class Settings:
     def excluded_files(self, v):
         self.data["excluded_files"] = v
 
+    @property
+    def urls(self):
+        return self.data["urls"]
+
+    @urls.setter
+    def urls(self, v):
+        self.data["urls"] = v
+
 
 # ── Sound file discovery ─────────────────────────────────────────────────────
 
@@ -171,6 +186,128 @@ def find_sound_files(excluded=None):
             if os.path.splitext(f)[1].lower() in SUPPORTED_AUDIO_EXT and f not in excluded:
                 files.append(os.path.join(SOUND_DIR, f))
     return files
+
+
+def get_cached_url_files(url_entries):
+    files = []
+    for entry in url_entries:
+        path = os.path.join(CACHE_DIR, entry.get("cache_file", ""))
+        if os.path.isfile(path):
+            files.append(path)
+    return files
+
+
+def clean_url_cache(url_entries):
+    if not os.path.isdir(CACHE_DIR):
+        return
+    keep = {e.get("cache_file", "") for e in url_entries}
+    for f in os.listdir(CACHE_DIR):
+        if f not in keep:
+            try:
+                os.remove(os.path.join(CACHE_DIR, f))
+            except OSError:
+                pass
+
+
+FFMPEG_URL = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
+
+
+def find_ffmpeg():
+    local = os.path.join(FFMPEG_DIR, "ffmpeg.exe")
+    if os.path.isfile(local):
+        return FFMPEG_DIR
+    if shutil.which("ffmpeg"):
+        return None
+    return ""
+
+
+def download_ffmpeg(progress_cb=None):
+    os.makedirs(FFMPEG_DIR, exist_ok=True)
+    zip_path = os.path.join(FFMPEG_DIR, "ffmpeg.zip")
+    try:
+        req = urllib.request.Request(FFMPEG_URL, headers={"User-Agent": "SketchASMR"})
+        with urllib.request.urlopen(req) as resp, open(zip_path, "wb") as out:
+            total = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                out.write(chunk)
+                downloaded += len(chunk)
+                if progress_cb and total:
+                    progress_cb(int(downloaded * 100 / total))
+        with zipfile.ZipFile(zip_path) as zf:
+            for member in zf.namelist():
+                name = os.path.basename(member)
+                if name in ("ffmpeg.exe", "ffprobe.exe"):
+                    with zf.open(member) as src, open(os.path.join(FFMPEG_DIR, name), "wb") as dst:
+                        shutil.copyfileobj(src, dst)
+    finally:
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+    return os.path.isfile(os.path.join(FFMPEG_DIR, "ffmpeg.exe"))
+
+
+def extract_audio(url, progress_cb=None):
+    import yt_dlp
+
+    ffmpeg_loc = find_ffmpeg()
+    if ffmpeg_loc == "":
+        raise RuntimeError("ffmpeg not found")
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    out_template = os.path.join(CACHE_DIR, "%(id)s.%(ext)s")
+    opts = {
+        "format": "bestaudio/best",
+        "outtmpl": out_template,
+        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+    if ffmpeg_loc:
+        opts["ffmpeg_location"] = ffmpeg_loc
+
+    if progress_cb:
+        def hook(d):
+            if d.get("status") == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+                dl = d.get("downloaded_bytes", 0)
+                if total:
+                    progress_cb(int(dl * 100 / total))
+        opts["progress_hooks"] = [hook]
+
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        vid_id = info["id"]
+        title = info.get("title", vid_id)
+        cache_file = f"{vid_id}.mp3"
+        return {"url": url, "title": title, "cache_file": cache_file}
+
+
+class UrlWorker(QThread):
+    progress = pyqtSignal(int)
+    finished_ok = pyqtSignal(dict)
+    finished_err = pyqtSignal(str)
+
+    def __init__(self, url, need_ffmpeg=False):
+        super().__init__()
+        self.url = url
+        self.need_ffmpeg = need_ffmpeg
+
+    def run(self):
+        try:
+            if self.need_ffmpeg:
+                self.progress.emit(0)
+                download_ffmpeg(lambda p: self.progress.emit(p // 2))
+            self.progress.emit(50 if self.need_ffmpeg else 0)
+            entry = extract_audio(self.url, lambda p: self.progress.emit(
+                50 + p // 2 if self.need_ffmpeg else p
+            ))
+            self.finished_ok.emit(entry)
+        except Exception as e:
+            self.finished_err.emit(str(e))
 
 
 def generate_placeholder_wav(filename, duration=3.0, sample_rate=44100):
@@ -866,9 +1003,11 @@ class SettingsDialog(QDialog):
         sl.addWidget(self._file_list)
         btn_row = QHBoxLayout()
         self._btn_add = QPushButton("Add Files")
+        self._btn_add_url = QPushButton("Add URL")
         self._btn_remove = QPushButton("Remove")
         self._btn_folder = QPushButton("Open Folder")
         btn_row.addWidget(self._btn_add)
+        btn_row.addWidget(self._btn_add_url)
         btn_row.addWidget(self._btn_remove)
         btn_row.addWidget(self._btn_folder)
         sl.addLayout(btn_row)
@@ -898,8 +1037,10 @@ class SettingsDialog(QDialog):
         hk_group.setLayout(hl)
         root.addWidget(hk_group)
 
+        self._url_worker = None
         self._radio_tablet.toggled.connect(self._on_input_mode)
         self._btn_add.clicked.connect(self._add_files)
+        self._btn_add_url.clicked.connect(self._add_url)
         self._btn_remove.clicked.connect(self._remove_file)
         self._btn_folder.clicked.connect(self._open_folder)
         self._vol_slider.valueChanged.connect(self._on_volume_preview)
@@ -924,6 +1065,10 @@ class SettingsDialog(QDialog):
         self._file_list.clear()
         for f in find_sound_files(self.settings.excluded_files):
             self._file_list.addItem(os.path.basename(f))
+        for entry in self.settings.urls:
+            item = QListWidgetItem(f"\u266b {entry.get('title', entry['url'])}")
+            item.setData(Qt.ItemDataRole.UserRole, entry)
+            self._file_list.addItem(item)
 
     def _on_input_mode(self, checked):
         mode = "tablet" if self._radio_tablet.isChecked() else "mouse"
@@ -957,22 +1102,77 @@ class SettingsDialog(QDialog):
         item = self._file_list.currentItem()
         if not item:
             return
-        name = item.text()
-        excluded = list(self.settings.excluded_files)
-        if name not in excluded:
-            excluded.append(name)
-        self.settings.excluded_files = excluded
-        self.settings.save()
+        entry = item.data(Qt.ItemDataRole.UserRole)
         if self.app_ref.audio:
             self.app_ref.audio.stop()
             pygame.mixer.music.stop()
             pygame.mixer.music.unload()
+        if entry:
+            urls = [u for u in self.settings.urls if u.get("url") != entry.get("url")]
+            self.settings.urls = urls
+            self.settings.save()
+            clean_url_cache(urls)
+        else:
+            name = item.text()
+            excluded = list(self.settings.excluded_files)
+            if name not in excluded:
+                excluded.append(name)
+            self.settings.excluded_files = excluded
+            self.settings.save()
         self._refresh_file_list()
         self.app_ref.reload_playlist()
 
     def _open_folder(self):
         os.makedirs(SOUND_DIR, exist_ok=True)
         os.startfile(SOUND_DIR)
+
+    def _add_url(self):
+        url, ok = QInputDialog.getText(self, "Add URL", "Paste a YouTube / audio URL:")
+        if not ok or not url.strip():
+            return
+        url = url.strip()
+        for entry in self.settings.urls:
+            if entry.get("url") == url:
+                QMessageBox.information(self, "Already added", "This URL is already in the playlist.")
+                return
+
+        ffmpeg_loc = find_ffmpeg()
+        need_ffmpeg = ffmpeg_loc == ""
+        if need_ffmpeg:
+            reply = QMessageBox.question(
+                self, "ffmpeg required",
+                "ffmpeg is needed to extract audio from URLs.\n\nDownload it now? (~80 MB)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        self._progress = QProgressDialog("Extracting audio...", "Cancel", 0, 100, self)
+        self._progress.setWindowModality(Qt.WindowModality.WindowModal)
+        self._progress.setMinimumDuration(0)
+        self._progress.setValue(0)
+
+        self._url_worker = UrlWorker(url, need_ffmpeg)
+        self._url_worker.progress.connect(self._progress.setValue)
+        self._url_worker.finished_ok.connect(self._on_url_done)
+        self._url_worker.finished_err.connect(self._on_url_error)
+        self._progress.canceled.connect(self._url_worker.terminate)
+        self._url_worker.start()
+
+    def _on_url_done(self, entry):
+        self._progress.close()
+        urls = list(self.settings.urls)
+        urls.append(entry)
+        self.settings.urls = urls
+        self.settings.save()
+        self._refresh_file_list()
+        self.app_ref.reload_playlist()
+        print(f"[url] added: {entry.get('title', entry['url'])}", flush=True)
+
+    def _on_url_error(self, msg):
+        self._progress.close()
+        QMessageBox.warning(self, "URL Error", f"Failed to extract audio:\n\n{msg}")
+        print(f"[url] error: {msg}", flush=True)
 
     def _on_volume_preview(self, val):
         self._vol_label.setText(f"{val}%")
@@ -1020,17 +1220,44 @@ class PenASMR:
         self.hotkey_mgr = None
         self.max_volume = self.settings.max_volume / 100.0
 
+    def _build_playlist(self):
+        files = find_sound_files(self.settings.excluded_files)
+        files += get_cached_url_files(self.settings.urls)
+        return files
+
+    def _recache_urls(self):
+        changed = False
+        valid = []
+        for entry in self.settings.urls:
+            path = os.path.join(CACHE_DIR, entry.get("cache_file", ""))
+            if os.path.isfile(path):
+                valid.append(entry)
+                continue
+            try:
+                print(f"[url] re-caching: {entry.get('title', entry['url'])}", flush=True)
+                fresh = extract_audio(entry["url"])
+                valid.append(fresh)
+                changed = True
+            except Exception as e:
+                print(f"[url] re-cache failed, removing: {e}", flush=True)
+                changed = True
+        if changed:
+            self.settings.urls = valid
+            self.settings.save()
+
     def _ensure_sound(self):
         if self.sound_path and os.path.exists(self.sound_path):
             self.playlist = [self.sound_path]
             return
-        self.playlist = find_sound_files(self.settings.excluded_files)
+        clean_url_cache(self.settings.urls)
+        self._recache_urls()
+        self.playlist = self._build_playlist()
 
     def reload_playlist(self):
         if self.audio:
             self.audio.stop()
             pygame.mixer.music.stop()
-        self.playlist = find_sound_files(self.settings.excluded_files)
+        self.playlist = self._build_playlist()
         self.audio = AudioManager(self.playlist)
         print(f"[playlist] reloaded - {len(self.playlist)} file(s)", flush=True)
 

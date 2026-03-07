@@ -7,3 +7,5 @@ build/
 installer_output/
 *.egg-info/
 .env
+cache/
+bin/
