@@ -943,6 +943,10 @@ class SettingsDialog(QDialog):
             return
         path = os.path.join(SOUND_DIR, item.text())
         if os.path.exists(path):
+            if self.app_ref.audio:
+                self.app_ref.audio.stop()
+                pygame.mixer.music.stop()
+                pygame.mixer.music.unload()
             os.remove(path)
         self._refresh_file_list()
         self.app_ref.reload_playlist()
