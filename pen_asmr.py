@@ -1413,6 +1413,31 @@ class PenASMR:
     def _update_menu_text(self):
         self._toggle_action.setText("Pause" if self.monitoring else "Resume")
 
+    def _check_for_updates(self):
+        import datetime
+        today = datetime.date.today().isoformat()
+        if self.settings.last_update_check == today:
+            return
+        self.settings.last_update_check = today
+        self.settings.save()
+        self._update_url = None
+
+        def on_update(version, url):
+            self._update_url = url
+            self.tray_icon.showMessage(
+                f"{APP_NAME} Update",
+                f"Version {version} is available. Click to download.",
+                QSystemTrayIcon.MessageIcon.Information,
+                10000,
+            )
+
+        self._update_worker = UpdateWorker()
+        self._update_worker.update_available.connect(on_update)
+        self.tray_icon.messageClicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl(self._update_url)) if self._update_url else None
+        )
+        self._update_worker.start()
+
     def _quit(self):
         if self.hotkey_mgr:
             self.hotkey_mgr.unregister()
