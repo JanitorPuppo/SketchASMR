@@ -1,5 +1,5 @@
 #define MyAppName "SketchASMR"
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 #define MyAppExeName "SketchASMR.exe"
 
 [Setup]
