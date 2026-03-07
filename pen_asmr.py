@@ -93,6 +93,7 @@ class Settings:
         "input_mode": "tablet",
         "max_volume": 80,
         "pause_hotkey": "",
+        "excluded_files": [],
     }
 
     def __init__(self):
@@ -138,6 +139,14 @@ class Settings:
     def pause_hotkey(self, v):
         self.data["pause_hotkey"] = v
 
+    @property
+    def excluded_files(self):
+        return self.data["excluded_files"]
+
+    @excluded_files.setter
+    def excluded_files(self, v):
+        self.data["excluded_files"] = v
+
 
 # ── Sound file discovery ─────────────────────────────────────────────────────
 
@@ -154,11 +163,12 @@ def seed_bundled_sounds():
             shutil.copy2(os.path.join(BUNDLED_SOUND_DIR, f), os.path.join(SOUND_DIR, f))
 
 
-def find_sound_files():
+def find_sound_files(excluded=None):
+    excluded = set(excluded or [])
     files = []
     if os.path.isdir(SOUND_DIR):
         for f in sorted(os.listdir(SOUND_DIR)):
-            if os.path.splitext(f)[1].lower() in SUPPORTED_AUDIO_EXT:
+            if os.path.splitext(f)[1].lower() in SUPPORTED_AUDIO_EXT and f not in excluded:
                 files.append(os.path.join(SOUND_DIR, f))
     return files
 
@@ -912,7 +922,7 @@ class SettingsDialog(QDialog):
 
     def _refresh_file_list(self):
         self._file_list.clear()
-        for f in find_sound_files():
+        for f in find_sound_files(self.settings.excluded_files):
             self._file_list.addItem(os.path.basename(f))
 
     def _on_input_mode(self, checked):
@@ -923,17 +933,23 @@ class SettingsDialog(QDialog):
         print(f"[settings] input mode -> {mode}", flush=True)
 
     def _add_files(self):
+        os.makedirs(SOUND_DIR, exist_ok=True)
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Add Sound Files", "",
+            self, "Add Sound Files", SOUND_DIR,
             "Audio Files (*.mp3 *.wav *.ogg);;All Files (*)",
         )
         if not files:
             return
-        os.makedirs(SOUND_DIR, exist_ok=True)
+        excluded = list(self.settings.excluded_files)
         for f in files:
-            dest = os.path.join(SOUND_DIR, os.path.basename(f))
+            name = os.path.basename(f)
+            dest = os.path.join(SOUND_DIR, name)
             if not os.path.exists(dest):
                 shutil.copy2(f, dest)
+            if name in excluded:
+                excluded.remove(name)
+        self.settings.excluded_files = excluded
+        self.settings.save()
         self._refresh_file_list()
         self.app_ref.reload_playlist()
 
@@ -941,13 +957,16 @@ class SettingsDialog(QDialog):
         item = self._file_list.currentItem()
         if not item:
             return
-        path = os.path.join(SOUND_DIR, item.text())
-        if os.path.exists(path):
-            if self.app_ref.audio:
-                self.app_ref.audio.stop()
-                pygame.mixer.music.stop()
-                pygame.mixer.music.unload()
-            os.remove(path)
+        name = item.text()
+        excluded = list(self.settings.excluded_files)
+        if name not in excluded:
+            excluded.append(name)
+        self.settings.excluded_files = excluded
+        self.settings.save()
+        if self.app_ref.audio:
+            self.app_ref.audio.stop()
+            pygame.mixer.music.stop()
+            pygame.mixer.music.unload()
         self._refresh_file_list()
         self.app_ref.reload_playlist()
 
@@ -1005,13 +1024,13 @@ class PenASMR:
         if self.sound_path and os.path.exists(self.sound_path):
             self.playlist = [self.sound_path]
             return
-        self.playlist = find_sound_files()
+        self.playlist = find_sound_files(self.settings.excluded_files)
 
     def reload_playlist(self):
         if self.audio:
             self.audio.stop()
             pygame.mixer.music.stop()
-        self.playlist = find_sound_files()
+        self.playlist = find_sound_files(self.settings.excluded_files)
         self.audio = AudioManager(self.playlist)
         print(f"[playlist] reloaded - {len(self.playlist)} file(s)", flush=True)
 
