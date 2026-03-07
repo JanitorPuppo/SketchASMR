@@ -146,12 +146,12 @@ def seed_bundled_sounds():
         return
     if not os.path.isdir(BUNDLED_SOUND_DIR):
         return
+    if os.path.isdir(SOUND_DIR):
+        return
     os.makedirs(SOUND_DIR, exist_ok=True)
     for f in os.listdir(BUNDLED_SOUND_DIR):
         if os.path.splitext(f)[1].lower() in SUPPORTED_AUDIO_EXT:
-            dest = os.path.join(SOUND_DIR, f)
-            if not os.path.exists(dest):
-                shutil.copy2(os.path.join(BUNDLED_SOUND_DIR, f), dest)
+            shutil.copy2(os.path.join(BUNDLED_SOUND_DIR, f), os.path.join(SOUND_DIR, f))
 
 
 def find_sound_files():
@@ -193,7 +193,8 @@ class AudioManager:
         self.current_index = 0
         self.state = "idle"
         self.current_volume = 0.0
-        self._load_current()
+        if self.playlist:
+            self._load_current()
 
     def _load_current(self):
         pygame.mixer.music.load(self.playlist[self.current_index])
@@ -210,6 +211,8 @@ class AudioManager:
         self.current_volume = vol
 
     def play(self, volume=1.0):
+        if not self.playlist:
+            return
         vol = max(0.0, min(1.0, volume))
         if self.state == "idle":
             self._start_playing(vol)
@@ -742,17 +745,19 @@ def make_tray_icon(active):
 # ── Settings dialog ──────────────────────────────────────────────────────────
 
 DIALOG_STYLE = """
-QDialog { background: #f8f8f8; }
+QDialog { background: #f8f8f8; color: #222; }
 QGroupBox {
     font-weight: bold; border: 1px solid #ccc; border-radius: 6px;
-    margin-top: 14px; padding: 14px 10px 10px 10px;
+    margin-top: 14px; padding: 14px 10px 10px 10px; color: #222;
 }
 QGroupBox::title {
-    subcontrol-origin: margin; left: 12px; padding: 0 6px;
+    subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #222;
 }
+QLabel { color: #222; }
+QRadioButton { color: #222; }
 QPushButton {
     padding: 5px 14px; border: 1px solid #bbb; border-radius: 4px;
-    background: #fff;
+    background: #fff; color: #222;
 }
 QPushButton:hover { background: #e8e8e8; }
 QSlider::groove:horizontal {
@@ -762,7 +767,7 @@ QSlider::handle:horizontal {
     width: 16px; margin: -5px 0; background: #4CAF50; border-radius: 8px;
 }
 QListWidget {
-    border: 1px solid #ccc; border-radius: 4px; background: #fff;
+    border: 1px solid #ccc; border-radius: 4px; background: #fff; color: #222;
 }
 """
 
@@ -887,11 +892,13 @@ class SettingsDialog(QDialog):
         self._btn_add.clicked.connect(self._add_files)
         self._btn_remove.clicked.connect(self._remove_file)
         self._btn_folder.clicked.connect(self._open_folder)
-        self._vol_slider.valueChanged.connect(self._on_volume)
+        self._vol_slider.valueChanged.connect(self._on_volume_preview)
+        self._vol_slider.sliderReleased.connect(self._on_volume_commit)
         self._hotkey_btn.sequenceChanged = self._on_hotkey
         self._btn_clear_hk.clicked.connect(self._clear_hotkey)
 
     def _load_current(self):
+        self._vol_slider.blockSignals(True)
         if self.settings.input_mode == "mouse":
             self._radio_mouse.setChecked(True)
         else:
@@ -899,6 +906,7 @@ class SettingsDialog(QDialog):
         self._refresh_file_list()
         self._vol_slider.setValue(self.settings.max_volume)
         self._vol_label.setText(f"{self.settings.max_volume}%")
+        self._vol_slider.blockSignals(False)
         if self.settings.pause_hotkey:
             self._hotkey_btn.setKeySequence(QKeySequence.fromString(self.settings.pause_hotkey))
 
@@ -943,8 +951,12 @@ class SettingsDialog(QDialog):
         os.makedirs(SOUND_DIR, exist_ok=True)
         os.startfile(SOUND_DIR)
 
-    def _on_volume(self, val):
+    def _on_volume_preview(self, val):
         self._vol_label.setText(f"{val}%")
+        self.app_ref.max_volume = val / 100.0
+
+    def _on_volume_commit(self):
+        val = self._vol_slider.value()
         self.settings.max_volume = val
         self.settings.save()
         self.app_ref.max_volume = val / 100.0
@@ -989,23 +1001,13 @@ class PenASMR:
         if self.sound_path and os.path.exists(self.sound_path):
             self.playlist = [self.sound_path]
             return
-        found = find_sound_files()
-        if found:
-            self.playlist = found
-        else:
-            generate_placeholder_wav(FALLBACK_WAV)
-            self.playlist = [FALLBACK_WAV]
+        self.playlist = find_sound_files()
 
     def reload_playlist(self):
         if self.audio:
             self.audio.stop()
             pygame.mixer.music.stop()
-        found = find_sound_files()
-        if found:
-            self.playlist = found
-        else:
-            generate_placeholder_wav(FALLBACK_WAV)
-            self.playlist = [FALLBACK_WAV]
+        self.playlist = find_sound_files()
         self.audio = AudioManager(self.playlist)
         print(f"[playlist] reloaded - {len(self.playlist)} file(s)", flush=True)
 
