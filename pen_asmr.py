@@ -37,8 +37,8 @@ from PyQt6.QtWidgets import (
     QSlider, QLabel, QFileDialog, QWidget, QInputDialog, QMessageBox,
     QProgressDialog,
 )
-from PyQt6.QtGui import QIcon, QImage, QPixmap, QColor, QAction, QKeySequence
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtGui import QIcon, QImage, QPixmap, QColor, QAction, QKeySequence, QDesktopServices
+from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal, QUrl
 
 print("[boot] pygame + PyQt6 done", flush=True)
 
@@ -64,8 +64,10 @@ SUPPORTED_AUDIO_EXT = (".mp3", ".wav", ".ogg")
 CONFIG_FILE = os.path.join(DATA_DIR, "settings.json")
 LOG_FILE = os.path.join(DATA_DIR, "log.txt")
 APP_NAME = "SketchASMR"
+APP_VERSION = "1.1.1"
 APP_AUTHOR = "janitorpuppo"
 APP_URL = "https://janitor.gg"
+GITHUB_REPO = "JanitorPuppo/SketchASMR"
 MIN_VOLUME = 0.05
 MUTEX_NAME = "Global\\SketchASMR_SingleInstance"
 
@@ -101,6 +103,7 @@ class Settings:
         "pause_hotkey": "",
         "excluded_files": [],
         "urls": [],
+        "last_update_check": "",
     }
 
     def __init__(self):
@@ -161,6 +164,48 @@ class Settings:
     @urls.setter
     def urls(self, v):
         self.data["urls"] = v
+
+    @property
+    def last_update_check(self):
+        return self.data["last_update_check"]
+
+    @last_update_check.setter
+    def last_update_check(self, v):
+        self.data["last_update_check"] = v
+
+
+# ── Update checker ────────────────────────────────────────────────────────────
+
+def parse_version(tag):
+    return tuple(int(x) for x in tag.lstrip("v").split("."))
+
+
+def check_for_update():
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    req = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode())
+    tag = data.get("tag_name", "")
+    html_url = data.get("html_url", "")
+    if not tag:
+        return None
+    remote = parse_version(tag)
+    local = parse_version(APP_VERSION)
+    if remote > local:
+        return (tag, html_url)
+    return None
+
+
+class UpdateWorker(QThread):
+    update_available = pyqtSignal(str, str)
+
+    def run(self):
+        try:
+            result = check_for_update()
+            if result:
+                self.update_available.emit(result[0], result[1])
+        except Exception:
+            pass
 
 
 # ── Sound file discovery ─────────────────────────────────────────────────────
@@ -261,7 +306,13 @@ def extract_audio(url, progress_cb=None):
     opts = {
         "format": "bestaudio/best",
         "outtmpl": out_template,
-        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
+        "postprocessors": [
+            {"key": "FFmpegExtractAudio", "preferredcodec": "mp3"},
+            {"key": "FFmpegMetadata"},
+        ],
+        "postprocessor_args": {
+            "FFmpegExtractAudio": ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"],
+        },
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
@@ -1433,6 +1484,7 @@ class PenASMR:
         self._poll_timer.start(8)
 
         self._build_tray()
+        self._check_for_updates()
 
         print(f"[{APP_NAME}] Running - max volume {self.settings.max_volume}%", flush=True)
         self.qt_app.exec()
