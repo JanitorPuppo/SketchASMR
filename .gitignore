@@ -9,3 +9,4 @@ installer_output/
 .env
 cache/
 bin/
+settings.json
