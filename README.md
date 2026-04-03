@@ -8,7 +8,9 @@ Built for any Windows Ink or WinTab-supported tablet (Wacom, Huion, Gaomon, etc.
 
 ### Getting started
 
-No installation needed — just run `SketchASMR.exe`. A small icon appears in the system tray (bottom-right of the taskbar, near the clock).
+An installer is available if you'd like to have a dedicated place for SketchASMR to run from, including where you manage your sound files.
+
+Alternatively, you can just run `SketchASMR.exe`. A small icon appears in the system tray (bottom-right of the taskbar, near the clock).
 
 - **Green icon** — monitoring is active. Touch pen to surface to hear the sound.
 - **Grey icon** — monitoring is paused.
@@ -18,22 +20,17 @@ No installation needed — just run `SketchASMR.exe`. A small icon appears in th
 | **Toggle on/off** | Double-click the tray icon, or press **Ctrl+Shift+P** |
 | **Quit** | Right-click the tray icon → Quit |
 
-### Custom sound
+### Custom sounds
 
-Create a `sounds` folder next to the exe and drop any audio file inside (MP3, WAV, or OGG):
-
-```
-SketchASMR.exe
-sounds/
-  └── pencil drawing.mp3   ← your custom sound
-```
+Open settings to view your sound files currently available. if you'd like, you can add your own files or provide a link. You can also view your available files by clicking Open Folder. 
 
 The app picks the first audio file it finds (sorted alphabetically). Long recordings work well — playback pauses when the pen lifts and resumes from the same position when it touches down again. If no custom file is found, the bundled placeholder sound is used.
 
 ### Removing
 
-Delete the exe. That's it — nothing is installed on the system.
+For Portable, nothing is installed. Simply delete the executable. If you'd like to clean up the sound folder as well, that can be found at %appdata%/SketchASMR
 
+for the Installer version, simply find the application in your installed applications list and run the uninstaller.
 ---
 
 ## For developers
