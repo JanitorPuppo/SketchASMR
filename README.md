@@ -31,6 +31,7 @@ The app picks the first audio file it finds (sorted alphabetically). Long record
 For Portable, nothing is installed. Simply delete the executable. If you'd like to clean up the sound folder as well, that can be found at %appdata%/SketchASMR
 
 for the Installer version, simply find the application in your installed applications list and run the uninstaller.
+
 ---
 
 ## For developers
