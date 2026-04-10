@@ -1,15 +1,6 @@
 import os
 import sys
 
-if getattr(sys, "frozen", False):
-    _log_path = os.path.join(os.path.dirname(sys.executable), "sketch_asmr.log")
-    try:
-        _log_fh = open(_log_path, "w", encoding="utf-8", buffering=1)
-        sys.stdout = _log_fh
-        sys.stderr = _log_fh
-    except Exception:
-        pass
-
 print("[boot] imports starting", flush=True)
 
 import json
@@ -68,9 +59,17 @@ SUPPORTED_AUDIO_EXT = (".mp3", ".wav", ".ogg")
 TRANSCODE_AUDIO_EXT = (".m4a", ".aac")
 BUNDLE_AUDIO_EXT = SUPPORTED_AUDIO_EXT + TRANSCODE_AUDIO_EXT
 CONFIG_FILE = os.path.join(DATA_DIR, "settings.json")
-LOG_FILE = os.path.join(DATA_DIR, "log.txt")
+LOG_FILE = os.path.join(DATA_DIR, "sketch_asmr.log")
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    _log_fh = open(LOG_FILE, "w", encoding="utf-8", buffering=1)
+    sys.stdout = _log_fh
+    sys.stderr = _log_fh
+except Exception:
+    pass
+print(f"[boot] log -> {LOG_FILE}", flush=True)
 APP_NAME = "SketchASMR"
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 APP_AUTHOR = "janitorpuppo"
 APP_URL = "https://janitor.gg"
 GITHUB_REPO = "JanitorPuppo/SketchASMR"
@@ -1202,16 +1201,16 @@ class SettingsDialog(QDialog):
         input_group.setLayout(il)
         root.addWidget(input_group)
 
-        sound_group = QGroupBox("Sound Files")
+        sound_group = QGroupBox("Loaded Sounds")
         sl = QVBoxLayout()
         self._file_list = QListWidget()
         self._file_list.setMinimumHeight(100)
         sl.addWidget(self._file_list)
         btn_row = QHBoxLayout()
-        self._btn_add = QPushButton("Add Files")
-        self._btn_add_url = QPushButton("Add URL")
+        self._btn_add = QPushButton("Load sounds")
+        self._btn_add_url = QPushButton("Load URL")
         self._btn_remove = QPushButton("Remove")
-        self._btn_folder = QPushButton("Open Folder")
+        self._btn_folder = QPushButton("Open Sounds")
         btn_row.addWidget(self._btn_add)
         btn_row.addWidget(self._btn_add_url)
         btn_row.addWidget(self._btn_remove)
@@ -1242,6 +1241,11 @@ class SettingsDialog(QDialog):
         hl.addWidget(self._btn_clear_hk)
         hk_group.setLayout(hl)
         root.addWidget(hk_group)
+
+        ver_label = QLabel(f"{APP_NAME} v{APP_VERSION}")
+        ver_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        ver_label.setStyleSheet("color: #999; font-size: 11px; margin-top: 4px;")
+        root.addWidget(ver_label)
 
         self._url_worker = None
         self._radio_tablet.toggled.connect(self._on_input_mode)
@@ -1286,7 +1290,7 @@ class SettingsDialog(QDialog):
     def _add_files(self):
         os.makedirs(SOUND_DIR, exist_ok=True)
         files, _ = QFileDialog.getOpenFileNames(
-            self, "Add Sound Files", SOUND_DIR,
+            self, "Load sounds", SOUND_DIR,
             "Audio Files (*.mp3 *.wav *.ogg *.m4a *.aac);;All Files (*)",
         )
         if not files:
@@ -1331,7 +1335,7 @@ class SettingsDialog(QDialog):
         os.startfile(SOUND_DIR)
 
     def _add_url(self):
-        url, ok = QInputDialog.getText(self, "Add URL", "Paste a YouTube / audio URL:")
+        url, ok = QInputDialog.getText(self, "Load URL", "Paste a YouTube / audio URL:")
         if not ok or not url.strip():
             return
         url = url.strip()
@@ -1427,6 +1431,7 @@ class SketchASMR:
         self._wintab = None
         self._poll_timer = None
         self._was_down = False
+        self._active_input = None
         self._settings_dialog = None
         self.hotkey_mgr = None
         self.pressure_ceiling = 1.0
@@ -1520,18 +1525,23 @@ class SketchASMR:
                 self.handle_release()
             return
 
-        wt = self._wintab
-        if wt and wt.pen_down:
-            normalized = max(0.0, min(1.0, wt.pressure / wt.max_pressure))
-            self.handle_pressure(normalized)
-            if not self._was_down:
-                self._was_down = True
-        elif self._pen_hook.pen_down:
+        if self._pen_hook.pen_down:
             raw = self._pen_hook.pressure
             normalized = max(0.0, min(1.0, raw / TABLET_MAX_PRESSURE))
             self.handle_pressure(normalized)
             if not self._was_down:
                 self._was_down = True
+                if self._active_input != "ink":
+                    self._active_input = "ink"
+                    print(f"[input] pen down via Windows Ink (pressure={raw})", flush=True)
+        elif self._wintab and self._wintab.pen_down:
+            normalized = max(0.0, min(1.0, self._wintab.pressure / self._wintab.max_pressure))
+            self.handle_pressure(normalized)
+            if not self._was_down:
+                self._was_down = True
+                if self._active_input != "wintab":
+                    self._active_input = "wintab"
+                    print(f"[input] pen down via WinTab (pressure={self._wintab.pressure}/{self._wintab.max_pressure})", flush=True)
         elif self._was_down:
             self._was_down = False
             self.handle_release()

@@ -24,7 +24,7 @@ Alternatively, you can just run `SketchASMR.exe`. A small icon appears in the sy
 
 The build **bundles a default set of custom drawing/ASMR-style clips** shipped in `sounds/`. On first run, those bundled files are copied into `%APPDATA%\SketchASMR\sounds` if that folder does not exist yet. If you're updating to this I recommend deleting this directory first.
 
-Open **Settings** to see the list, add your own files, paste an audio URL, or use **Open Folder**. **MP3, WAV, and OGG** play directly. **M4A / AAC** need **ffmpeg** on `PATH` or downloaded via the URL feature (cached under `%APPDATA%\SketchASMR\bin`); they are transcoded to a WAV cache on first use.
+Open **Settings** to see the list, use **Load sounds** / **Load URL**, or **Open Sounds**. **MP3, WAV, and OGG** play directly. **M4A / AAC** need **ffmpeg** on `PATH` or downloaded via the URL feature (cached under `%APPDATA%\SketchASMR\bin`); they are transcoded to a WAV cache on first use.
 
 The app uses whatever files it finds there (sorted alphabetically; you can exclude files in settings). Long recordings work too — playback pauses when the pen lifts and resumes from the same position when it touches down again.
 
@@ -33,6 +33,29 @@ The app uses whatever files it finds there (sorted alphabetically; you can exclu
 **Portable:** Delete `SketchASMR.exe`. To remove settings, sounds, and cache, delete `%APPDATA%\SketchASMR`.
 
 **Installer:** Uninstall from **Settings → Apps** (or **Add or remove programs**). Optionally delete `%APPDATA%\SketchASMR` if you want user data gone too.
+
+### Troubleshooting
+
+#### Huion tablets + Adobe Photoshop
+
+With **Windows Ink enabled** in the Huion driver, the driver can take over Windows Ink events in a way that **blocks SketchASMR** from receiving pen input in some setups.
+
+1. **Disable Windows Ink** in the Huion tablet software. That usually restores SketchASMR (which prefers Windows Ink when available, and falls back to WinTab).
+
+2. **Photoshop** - Photoshop prefers to use Windows Ink. for Huion tablets (and others that take exclusive control of Windows Ink events), you also need to instruct Photoshop to use WinTab.
+
+   - Copy the sample config from [`PSUserConfig.txt`](PSUserConfig.txt) in this repository (it sets Photoshop to use WinTab / system stylus off).
+   - Place the file here (create the `Settings` folder if needed), replacing `[Version]` with your installed Photoshop version (e.g. `2024`):
+
+     `%APPDATA%\Adobe\Adobe Photoshop [Version]\Adobe Photoshop [Version] Settings\PSUserConfig.txt`
+
+     Example for Photoshop 2024:
+
+     `%APPDATA%\Adobe\Adobe Photoshop 2024\Adobe Photoshop 2024 Settings\PSUserConfig.txt`
+
+   - **Restart Photoshop** after saving the file.
+
+Logs for debugging live at `%APPDATA%\SketchASMR\sketch_asmr.log` (rewritten each launch).
 
 ---
 
@@ -62,6 +85,7 @@ SketchASMR/
 ├── sketch_asmr.py           Main application
 ├── requirements.txt      Python dependencies
 ├── build.bat             One-click build script
+├── PSUserConfig.txt      Optional Photoshop WinTab hint (see Troubleshooting)
 ├── sounds/
 │   └── *.mp3 / *.wav / *.ogg / …   Bundled default clips
 └── README.md

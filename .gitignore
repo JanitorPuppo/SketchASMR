@@ -10,3 +10,4 @@ installer_output/
 cache/
 bin/
 settings.json
+*.log
