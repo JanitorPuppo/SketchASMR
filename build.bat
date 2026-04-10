@@ -1,12 +1,16 @@
 @echo off
 setlocal
+cd /d "%~dp0"
 
-set "PYTHON=C:\Users\Home\AppData\Local\Programs\Python\Python312\python.exe"
+set "PYTHON=%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
 
 echo.
 echo ============================================
 echo   Building SketchASMR
 echo ============================================
+echo.
+echo Project dir: %CD%
+echo One-file exe embeds the "sounds" folder; dist\ will only show SketchASMR.exe.
 echo.
 
 "%PYTHON%" -m pip install -r requirements.txt
@@ -30,7 +34,9 @@ echo.
     --icon "icon.ico" ^
     --hidden-import PyQt6.sip ^
     --hidden-import yt_dlp ^
-    pen_asmr.py
+    --hidden-import numpy ^
+    --hidden-import pygame.sndarray ^
+    sketch_asmr.py
 
 if errorlevel 1 (
     echo.

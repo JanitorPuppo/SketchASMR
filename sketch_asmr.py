@@ -24,13 +24,16 @@ import hashlib
 import zipfile
 import threading
 import urllib.request
+import subprocess
 from ctypes import wintypes, Structure, byref, POINTER as CPTR
 
 print("[boot] stdlib done", flush=True)
 
 os.environ["QT_WINTAB_ENABLED"] = "0"
 
+import numpy as np
 import pygame
+import pygame.sndarray
 from PyQt6.QtWidgets import (
     QApplication, QSystemTrayIcon, QMenu, QDialog, QVBoxLayout, QHBoxLayout,
     QGroupBox, QRadioButton, QListWidget, QListWidgetItem, QPushButton,
@@ -50,8 +53,8 @@ else:
     BUNDLE_DIR = EXE_DIR
 
 APPDATA_DIR = os.path.join(os.environ.get("APPDATA", EXE_DIR), "SketchASMR")
-_local_sounds = os.path.join(EXE_DIR, "sounds")
-PORTABLE = os.path.isdir(_local_sounds) or not getattr(sys, "frozen", False)
+# Frozen exe always uses AppData; running from source uses the project directory.
+PORTABLE = not getattr(sys, "frozen", False)
 DATA_DIR = EXE_DIR if PORTABLE else APPDATA_DIR
 
 SOUND_DIR = os.path.join(DATA_DIR, "sounds")
@@ -61,15 +64,19 @@ BUNDLED_SOUND_DIR = os.path.join(BUNDLE_DIR, "sounds")
 ICON_FILE = os.path.join(BUNDLE_DIR, "icon.png")
 FALLBACK_WAV = os.path.join(SOUND_DIR, "writing.wav")
 SUPPORTED_AUDIO_EXT = (".mp3", ".wav", ".ogg")
+# Copied from bundle / listed in folder; played after ffmpeg transcode to WAV cache.
+TRANSCODE_AUDIO_EXT = (".m4a", ".aac")
+BUNDLE_AUDIO_EXT = SUPPORTED_AUDIO_EXT + TRANSCODE_AUDIO_EXT
 CONFIG_FILE = os.path.join(DATA_DIR, "settings.json")
 LOG_FILE = os.path.join(DATA_DIR, "log.txt")
 APP_NAME = "SketchASMR"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 APP_AUTHOR = "janitorpuppo"
 APP_URL = "https://janitor.gg"
 GITHUB_REPO = "JanitorPuppo/SketchASMR"
 MIN_VOLUME = 0.05
 MUTEX_NAME = "Global\\SketchASMR_SingleInstance"
+_MIXER_BOOST_CHANNEL_READY = False
 
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
@@ -99,7 +106,7 @@ def release_single_instance():
 class Settings:
     DEFAULTS = {
         "input_mode": "tablet",
-        "max_volume": 80,
+        "max_volume": 100,
         "pause_hotkey": "",
         "excluded_files": [],
         "urls": [],
@@ -219,8 +226,71 @@ def seed_bundled_sounds():
         return
     os.makedirs(SOUND_DIR, exist_ok=True)
     for f in os.listdir(BUNDLED_SOUND_DIR):
-        if os.path.splitext(f)[1].lower() in SUPPORTED_AUDIO_EXT:
+        if os.path.splitext(f)[1].lower() in BUNDLE_AUDIO_EXT:
             shutil.copy2(os.path.join(BUNDLED_SOUND_DIR, f), os.path.join(SOUND_DIR, f))
+
+
+def ffmpeg_binary():
+    local = os.path.join(FFMPEG_DIR, "ffmpeg.exe")
+    if os.path.isfile(local):
+        return local
+    return shutil.which("ffmpeg") or ""
+
+
+def _transcode_cache_wav(src_path):
+    st = os.stat(src_path)
+    key = hashlib.sha256(
+        f"{os.path.normcase(os.path.abspath(src_path))}\0{st.st_mtime_ns}\0{st.st_size}".encode()
+    ).hexdigest()[:40]
+    d = os.path.join(CACHE_DIR, "transcoded")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"{key}.wav")
+
+
+def transcode_sound_to_wav(src_path):
+    """Decode M4A/AAC etc. to a cached WAV pygame can play. Returns None if ffmpeg missing or transcode fails."""
+    dst = _transcode_cache_wav(src_path)
+    if os.path.isfile(dst):
+        try:
+            if os.path.getmtime(dst) >= os.path.getmtime(src_path):
+                return dst
+        except OSError:
+            pass
+    ff = ffmpeg_binary()
+    if not ff:
+        print(f"[audio] skipping (no ffmpeg): {os.path.basename(src_path)}", flush=True)
+        return None
+    try:
+        subprocess.run(
+            [
+                ff,
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                src_path,
+                "-acodec",
+                "pcm_s16le",
+                "-ar",
+                "44100",
+                "-ac",
+                "2",
+                dst,
+            ],
+            check=True,
+            timeout=600,
+            capture_output=True,
+        )
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as e:
+        print(f"[audio] transcode failed: {os.path.basename(src_path)}: {e}", flush=True)
+        try:
+            os.remove(dst)
+        except OSError:
+            pass
+        return None
+    return dst
 
 
 def find_sound_files(excluded=None):
@@ -228,8 +298,16 @@ def find_sound_files(excluded=None):
     files = []
     if os.path.isdir(SOUND_DIR):
         for f in sorted(os.listdir(SOUND_DIR)):
-            if os.path.splitext(f)[1].lower() in SUPPORTED_AUDIO_EXT and f not in excluded:
-                files.append(os.path.join(SOUND_DIR, f))
+            if f in excluded:
+                continue
+            ext = os.path.splitext(f)[1].lower()
+            full = os.path.join(SOUND_DIR, f)
+            if ext in SUPPORTED_AUDIO_EXT:
+                files.append(full)
+            elif ext in TRANSCODE_AUDIO_EXT:
+                w = transcode_sound_to_wav(full)
+                if w:
+                    files.append(w)
     return files
 
 
@@ -384,29 +462,70 @@ def generate_placeholder_wav(filename, duration=3.0, sample_rate=44100):
 # ── Audio manager ────────────────────────────────────────────────────────────
 
 class AudioManager:
-    def __init__(self, playlist):
+    """Plays playlist via pygame.mixer.music (gain ≤ 1) or boosted Sounds (gain > 1)."""
+
+    @staticmethod
+    def _build_boosted_sounds(paths, gain):
+        out = []
+        g = float(gain)
+        for path in paths:
+            raw = pygame.mixer.Sound(path)
+            arr = pygame.sndarray.array(raw)
+            boosted = arr.astype(np.float32) * g
+            np.clip(boosted, -32768, 32767, out=boosted)
+            out.append(pygame.sndarray.make_sound(boosted.astype(np.int16)))
+        return out
+
+    def __init__(self, playlist, sample_gain=1.0):
+        global _MIXER_BOOST_CHANNEL_READY
         if not pygame.mixer.get_init():
             pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
-        self.playlist = playlist
+        self.playlist = list(playlist)
+        self.sample_gain = float(sample_gain)
+        self._boosted = self.sample_gain > 1.001
+        self._channel = None
+        self._sounds = None
         self.current_index = 0
         self.state = "idle"
         self.current_volume = 0.0
-        if self.playlist:
-            self._load_current()
+        if not self.playlist:
+            return
+        if self._boosted:
+            if not _MIXER_BOOST_CHANNEL_READY:
+                pygame.mixer.set_reserved(1)
+                _MIXER_BOOST_CHANNEL_READY = True
+            self._channel = pygame.mixer.Channel(0)
+            self._sounds = self._build_boosted_sounds(self.playlist, self.sample_gain)
+        self._load_current()
 
     def _load_current(self):
+        if not self.playlist:
+            return
+        if self._boosted:
+            return
         pygame.mixer.music.load(self.playlist[self.current_index])
 
     def _advance(self):
         self.current_index = (self.current_index + 1) % len(self.playlist)
-        self._load_current()
+        if not self._boosted:
+            self._load_current()
 
     def _start_playing(self, vol):
-        pygame.mixer.music.set_volume(vol)
+        vol = max(0.0, min(1.0, vol))
         loops = -1 if len(self.playlist) == 1 else 0
-        pygame.mixer.music.play(loops=loops)
+        if self._boosted:
+            self._channel.set_volume(vol)
+            self._channel.play(self._sounds[self.current_index], loops=loops)
+        else:
+            pygame.mixer.music.set_volume(vol)
+            pygame.mixer.music.play(loops=loops)
         self.state = "playing"
         self.current_volume = vol
+
+    def _stream_busy(self):
+        if self._boosted:
+            return self._channel.get_busy()
+        return pygame.mixer.music.get_busy()
 
     def play(self, volume=1.0):
         if not self.playlist:
@@ -415,26 +534,53 @@ class AudioManager:
         if self.state == "idle":
             self._start_playing(vol)
         elif self.state == "paused":
-            pygame.mixer.music.set_volume(vol)
-            pygame.mixer.music.unpause()
+            if self._boosted:
+                self._channel.set_volume(vol)
+                self._channel.unpause()
+            else:
+                pygame.mixer.music.set_volume(vol)
+                pygame.mixer.music.unpause()
             self.state = "playing"
             self.current_volume = vol
-        elif not pygame.mixer.music.get_busy():
+        elif not self._stream_busy():
             self._advance()
             self._start_playing(vol)
         elif abs(vol - self.current_volume) > 0.05:
-            pygame.mixer.music.set_volume(vol)
+            if self._boosted:
+                self._channel.set_volume(vol)
+            else:
+                pygame.mixer.music.set_volume(vol)
             self.current_volume = vol
 
     def stop(self):
         if self.state == "playing":
-            pygame.mixer.music.pause()
+            if self._boosted:
+                self._channel.pause()
+            else:
+                pygame.mixer.music.pause()
             self.state = "paused"
             self.current_volume = 0.0
 
+    def release(self):
+        try:
+            pygame.mixer.music.stop()
+            pygame.mixer.music.unload()
+        except Exception:
+            pass
+        if self._boosted and self._channel is not None:
+            try:
+                self._channel.stop()
+            except Exception:
+                pass
+        self.state = "idle"
+        self.current_volume = 0.0
+
     def cleanup(self):
-        pygame.mixer.music.stop()
-        pygame.mixer.quit()
+        self.release()
+        try:
+            pygame.mixer.quit()
+        except Exception:
+            pass
 
 
 # ── Low-level mouse hook ─────────────────────────────────────────────────────
@@ -1031,8 +1177,17 @@ class SettingsDialog(QDialog):
         self.setMinimumWidth(440)
         self.setStyleSheet(DIALOG_STYLE)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint)
+        self._vol_rebuild_timer = QTimer(self)
+        self._vol_rebuild_timer.setSingleShot(True)
+        self._vol_rebuild_timer.timeout.connect(self._flush_volume_audio_rebuild)
         self._build_ui()
         print("[settings] dialog created ok", flush=True)
+
+    def closeEvent(self, event):
+        self._vol_rebuild_timer.stop()
+        self.app_ref._sync_volume_fields_from_percent(self.settings.max_volume)
+        self.app_ref.rebuild_audio_if_gain_changed()
+        super().closeEvent(event)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -1069,10 +1224,10 @@ class SettingsDialog(QDialog):
         vl = QHBoxLayout()
         vl.addWidget(QLabel("Max"))
         self._vol_slider = QSlider(Qt.Orientation.Horizontal)
-        self._vol_slider.setRange(5, 100)
+        self._vol_slider.setRange(5, 150)
         vl.addWidget(self._vol_slider)
-        self._vol_label = QLabel("80%")
-        self._vol_label.setFixedWidth(40)
+        self._vol_label = QLabel("100%")
+        self._vol_label.setFixedWidth(48)
         vl.addWidget(self._vol_label)
         vol_group.setLayout(vl)
         root.addWidget(vol_group)
@@ -1132,7 +1287,7 @@ class SettingsDialog(QDialog):
         os.makedirs(SOUND_DIR, exist_ok=True)
         files, _ = QFileDialog.getOpenFileNames(
             self, "Add Sound Files", SOUND_DIR,
-            "Audio Files (*.mp3 *.wav *.ogg);;All Files (*)",
+            "Audio Files (*.mp3 *.wav *.ogg *.m4a *.aac);;All Files (*)",
         )
         if not files:
             return
@@ -1155,9 +1310,7 @@ class SettingsDialog(QDialog):
             return
         entry = item.data(Qt.ItemDataRole.UserRole)
         if self.app_ref.audio:
-            self.app_ref.audio.stop()
-            pygame.mixer.music.stop()
-            pygame.mixer.music.unload()
+            self.app_ref.audio.release()
         if entry:
             urls = [u for u in self.settings.urls if u.get("url") != entry.get("url")]
             self.settings.urls = urls
@@ -1227,13 +1380,20 @@ class SettingsDialog(QDialog):
 
     def _on_volume_preview(self, val):
         self._vol_label.setText(f"{val}%")
-        self.app_ref.max_volume = val / 100.0
+        self.app_ref._sync_volume_fields_from_percent(val)
+        self._vol_rebuild_timer.stop()
+        self._vol_rebuild_timer.start(280)
+
+    def _flush_volume_audio_rebuild(self):
+        self.app_ref.rebuild_audio_if_gain_changed()
 
     def _on_volume_commit(self):
+        self._vol_rebuild_timer.stop()
         val = self._vol_slider.value()
         self.settings.max_volume = val
         self.settings.save()
-        self.app_ref.max_volume = val / 100.0
+        self.app_ref._sync_volume_fields_from_percent(val)
+        self.app_ref.rebuild_audio_if_gain_changed()
 
     def _on_hotkey(self, seq):
         seq_str = seq.toString()
@@ -1253,7 +1413,7 @@ class SettingsDialog(QDialog):
 
 # ── Main application ─────────────────────────────────────────────────────────
 
-class PenASMR:
+class SketchASMR:
     def __init__(self, sound_path=None):
         self.sound_path = sound_path
         self.settings = Settings()
@@ -1269,7 +1429,33 @@ class PenASMR:
         self._was_down = False
         self._settings_dialog = None
         self.hotkey_mgr = None
-        self.max_volume = self.settings.max_volume / 100.0
+        self.pressure_ceiling = 1.0
+        self.sample_gain = 1.0
+        self._sync_volume_fields_from_percent(self.settings.max_volume)
+
+    def _sync_volume_fields_from_percent(self, pct_int):
+        pct = pct_int / 100.0
+        if pct > 1.0:
+            self.pressure_ceiling = 1.0
+            self.sample_gain = pct
+        else:
+            self.pressure_ceiling = pct
+            self.sample_gain = 1.0
+
+    def rebuild_audio_if_gain_changed(self):
+        if not self.playlist:
+            return
+        boosted = self.sample_gain > 1.001
+        if (
+            self.audio is not None
+            and abs(getattr(self.audio, "sample_gain", 0) - self.sample_gain) < 1e-6
+            and getattr(self.audio, "_boosted", False) == boosted
+        ):
+            return
+        if self.audio:
+            self.audio.release()
+        self.audio = AudioManager(self.playlist, self.sample_gain)
+        print(f"[audio] rebuilt gain={self.sample_gain:.3f} boosted={boosted}", flush=True)
 
     def _build_playlist(self):
         files = find_sound_files(self.settings.excluded_files)
@@ -1306,19 +1492,21 @@ class PenASMR:
 
     def reload_playlist(self):
         if self.audio:
-            self.audio.stop()
-            pygame.mixer.music.stop()
+            self.audio.release()
         self.playlist = self._build_playlist()
-        self.audio = AudioManager(self.playlist)
+        self.audio = AudioManager(self.playlist, self.sample_gain) if self.playlist else None
         print(f"[playlist] reloaded - {len(self.playlist)} file(s)", flush=True)
 
     def handle_pressure(self, normalized):
-        volume = MIN_VOLUME + normalized * (self.max_volume - MIN_VOLUME)
-        volume = max(MIN_VOLUME, min(self.max_volume, volume))
-        self.audio.play(volume)
+        hi = self.pressure_ceiling
+        volume = MIN_VOLUME + normalized * (hi - MIN_VOLUME)
+        volume = max(MIN_VOLUME, min(hi, volume))
+        if self.audio:
+            self.audio.play(volume)
 
     def handle_release(self):
-        self.audio.stop()
+        if self.audio:
+            self.audio.stop()
 
     def _poll_pen(self):
         if self._pen_detector:
@@ -1409,6 +1597,18 @@ class PenASMR:
         self.tray_icon.setContextMenu(menu)
         self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
+        # Brief delay so the tray icon is registered before the balloon/toast (Windows can drop immediate messages).
+        QTimer.singleShot(750, self._show_startup_notification)
+
+    def _show_startup_notification(self):
+        if not self.tray_icon or not QSystemTrayIcon.supportsMessages():
+            return
+        self.tray_icon.showMessage(
+            APP_NAME,
+            "Running in the system tray — double-click the icon to pause or resume. Right-click for Settings or Quit.",
+            QSystemTrayIcon.MessageIcon.Information,
+            8000,
+        )
 
     def _update_menu_text(self):
         self._toggle_action.setText("Pause" if self.monitoring else "Resume")
@@ -1448,7 +1648,6 @@ class PenASMR:
         if hasattr(self, "_wintab") and self._wintab:
             self._wintab.stop()
         if self.audio:
-            self.audio.stop()
             self.audio.cleanup()
         release_single_instance()
         self.qt_app.quit()
@@ -1462,7 +1661,8 @@ class PenASMR:
         for i, f in enumerate(self.playlist):
             print(f"  {i + 1}. {os.path.basename(f)}", flush=True)
 
-        self.audio = AudioManager(self.playlist)
+        self._sync_volume_fields_from_percent(self.settings.max_volume)
+        self.audio = AudioManager(self.playlist, self.sample_gain)
 
         def _excepthook(exc_type, exc_value, exc_tb):
             import traceback
@@ -1518,7 +1718,7 @@ class PenASMR:
 if __name__ == "__main__":
     try:
         sound = sys.argv[1] if len(sys.argv) > 1 else None
-        app = PenASMR(sound_path=sound)
+        app = SketchASMR(sound_path=sound)
         app.run()
     except Exception:
         import traceback

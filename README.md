@@ -22,15 +22,15 @@ Alternatively, you can just run `SketchASMR.exe`. A small icon appears in the sy
 
 ### Custom sounds
 
-Open settings to view your sound files currently available. if you'd like, you can add your own files or provide a link. You can also view your available files by clicking Open Folder. 
+Open **Settings** to see your sound list, add files, paste an audio URL, or use **Open Folder**. Files live under `%APPDATA%\SketchASMR\sounds` (e.g. `C:\Users\<you>\AppData\Roaming\SketchASMR\sounds`). **MP3, WAV, and OGG** play directly. **M4A / AAC** need **ffmpeg** on `PATH` or downloaded via the URL feature (cached under `%APPDATA%\SketchASMR\bin`); they are transcoded to a WAV cache on first use.
 
-The app picks the first audio file it finds (sorted alphabetically). Long recordings work well — playback pauses when the pen lifts and resumes from the same position when it touches down again. If no custom file is found, the bundled placeholder sound is used.
+The app uses the files it finds there (sorted alphabetically; you can exclude files in settings). Long recordings work well — playback pauses when the pen lifts and resumes from the same position when it touches down again. On first run, bundled sounds are copied into that folder if it does not exist yet.
 
 ### Removing
 
-For Portable, nothing is installed. Simply delete the executable. If you'd like to clean up the sound folder as well, that can be found at %appdata%/SketchASMR
+**Portable:** Delete `SketchASMR.exe`. To remove settings, sounds, and cache, delete `%APPDATA%\SketchASMR`.
 
-for the Installer version, simply find the application in your installed applications list and run the uninstaller.
+**Installer:** Uninstall from **Settings → Apps** (or **Add or remove programs**). Optionally delete `%APPDATA%\SketchASMR` if you want user data gone too.
 
 ---
 
@@ -46,7 +46,7 @@ for the Installer version, simply find the application in your installed applica
 
 ```
 pip install -r requirements.txt
-python pen_asmr.py
+python sketch_asmr.py
 ```
 
 ### Building the portable exe
@@ -57,7 +57,7 @@ Run `build.bat`. This installs dependencies and uses PyInstaller to produce a si
 
 ```
 SketchASMR/
-├── pen_asmr.py           Main application
+├── sketch_asmr.py           Main application
 ├── requirements.txt      Python dependencies
 ├── build.bat             One-click build script
 ├── sounds/
@@ -69,7 +69,7 @@ SketchASMR/
 
 1. **Pen pressure** — Reads stylus pressure through the WinTab API (`wintab32.dll`), which is installed alongside tablet drivers. Supports the full pressure range of the device (up to 8192 levels).
 
-2. **Audio** — Streams an audio file (MP3/WAV/OGG) using `pygame.mixer.music`. Playback pauses when the pen lifts and resumes from the same position on the next stroke. Volume scales with pressure (15% at lightest touch, 100% at full pressure). Loops back to the start when the file ends.
+2. **Audio** — Streams an audio file (MP3/WAV/OGG) using `pygame.mixer.music` (or decoded `Sound` buffers when the max volume is above 100% for digital gain). Playback pauses when the pen lifts and resumes from the same position on the next stroke. Volume scales with pressure (5% floor at lightest touch, up to the “Max” slider at full pressure; the slider goes to 150% for extra loudness, which can clip on hot masters). Loops back to the start when the file ends.
 
 3. **Fallback** — If WinTab is unavailable, detects left-mouse-button state as a proxy for pen contact (not pressure-sensitive, but functional).
 
