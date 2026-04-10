@@ -20,11 +20,13 @@ Alternatively, you can just run `SketchASMR.exe`. A small icon appears in the sy
 | **Toggle on/off** | Double-click the tray icon, or press **Ctrl+Shift+P** |
 | **Quit** | Right-click the tray icon → Quit |
 
-### Custom sounds
+### Sounds
 
-Open **Settings** to see your sound list, add files, paste an audio URL, or use **Open Folder**. Files live under `%APPDATA%\SketchASMR\sounds` (e.g. `C:\Users\<you>\AppData\Roaming\SketchASMR\sounds`). **MP3, WAV, and OGG** play directly. **M4A / AAC** need **ffmpeg** on `PATH` or downloaded via the URL feature (cached under `%APPDATA%\SketchASMR\bin`); they are transcoded to a WAV cache on first use.
+The build **bundles a default set of custom drawing/ASMR-style clips** shipped in `sounds/`. On first run, those bundled files are copied into `%APPDATA%\SketchASMR\sounds` if that folder does not exist yet. If you're updating to this I recommend deleting this directory first.
 
-The app uses the files it finds there (sorted alphabetically; you can exclude files in settings). Long recordings work well — playback pauses when the pen lifts and resumes from the same position when it touches down again. On first run, bundled sounds are copied into that folder if it does not exist yet.
+Open **Settings** to see the list, add your own files, paste an audio URL, or use **Open Folder**. **MP3, WAV, and OGG** play directly. **M4A / AAC** need **ffmpeg** on `PATH` or downloaded via the URL feature (cached under `%APPDATA%\SketchASMR\bin`); they are transcoded to a WAV cache on first use.
+
+The app uses whatever files it finds there (sorted alphabetically; you can exclude files in settings). Long recordings work too — playback pauses when the pen lifts and resumes from the same position when it touches down again.
 
 ### Removing
 
@@ -61,7 +63,7 @@ SketchASMR/
 ├── requirements.txt      Python dependencies
 ├── build.bat             One-click build script
 ├── sounds/
-│   └── *.mp3/wav/ogg     Sound file (placeholder generated if missing)
+│   └── *.mp3 / *.wav / *.ogg / …   Bundled default clips
 └── README.md
 ```
 
